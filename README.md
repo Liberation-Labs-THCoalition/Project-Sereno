@@ -8,7 +8,7 @@ Named after the [serenos](https://en.wikipedia.org/wiki/Sereno_(nightwatchman)) 
 
 ## What It Does
 
-Sereno watches your machine for security threats and tells you what it finds in language you understand. No cloud. No accounts. No telemetry. Runs on a Raspberry Pi.
+Sereno watches your machine for security threats and tells you what it finds in language you understand. No cloud. No accounts. No telemetry: nothing leaves the machine unless you turn on Discord alerts. Runs on a Raspberry Pi.
 
 - **Scans** for compromised packages, malware persistence, exposed credentials, suspicious processes
 - **Monitors** file integrity against a known-good baseline
@@ -58,7 +58,8 @@ No dependencies beyond Python 3.8+. No pip install. Clone and run.
 # Print to terminal (default)
 python3 -m sentinel scan
 
-# Send to Discord
+# Send to Discord. The alert text then goes to Discord's servers: tokens, keys and passwords are
+# redacted first; file paths, process names and port numbers are sent.
 python3 -m sentinel scan --discord https://discord.com/api/webhooks/YOUR/WEBHOOK
 
 # Log to file
@@ -127,7 +128,7 @@ If you find a vulnerability in Sereno itself, please report it privately.
 
 ## License
 
-MIT
+Hippocratic License 3.0, with Liberation Labs' modules: see [LICENSE.md](LICENSE.md).
 
 ## Credits
 

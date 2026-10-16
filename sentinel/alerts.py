@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
+from .redact import redact
 from .scanner import ScanResult, Finding
 
 logger = logging.getLogger(__name__)
@@ -44,9 +45,14 @@ class FileAlert:
 
 
 class DiscordWebhookAlert:
-    """Send to a Discord webhook. No bot token needed — just a URL."""
+    """Send to a Discord webhook. No bot token needed — just a URL.
+
+    This is the one transport that leaves the machine, so every message is redacted here first: findings quote
+    process command lines and hook commands, which can hold tokens (Vera's audit, 2026-10-14)."""
     def __init__(self, webhook_url: str) -> None:
         self._url = webhook_url
+        logger.warning("Discord alerts are on: alert text goes to Discord's servers. Secrets are redacted first; "
+                       "file paths, process names and port numbers are sent.")
 
     def send(self, message: str, severity: str = "info") -> bool:
         try:
@@ -59,7 +65,7 @@ class DiscordWebhookAlert:
             payload = json.dumps({
                 "embeds": [{
                     "title": f"Security Alert [{severity.upper()}]",
-                    "description": message[:2000],
+                    "description": redact(message)[:2000],
                     "color": color,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }]
