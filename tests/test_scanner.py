@@ -153,7 +153,8 @@ class TestCredentials:
 
 
 class TestGitRepos:
-    def test_runs_without_error(self):
+    def test_runs_without_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
         findings = check_git_repos()
         assert isinstance(findings, list)
 
@@ -168,14 +169,16 @@ class TestGitRepos:
 
 
 class TestFullScanner:
-    def test_full_scan_runs(self):
+    def test_full_scan_runs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
         scanner = SentinelScanner()
         result = scanner.scan()
         assert isinstance(result, ScanResult)
         assert result.checks_run > 0
         assert result.hostname
 
-    def test_specific_checks(self):
+    def test_specific_checks(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
         scanner = SentinelScanner(checks=["persistence", "processes"])
         result = scanner.scan()
         assert result.checks_run == 2
