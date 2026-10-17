@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -115,7 +114,8 @@ def _findings_to_result(skill: str, checks: list[str]) -> SkillResult:
     assessments = [Assessment(severity=f.severity, title=f.title, details=f.description, grounded_in=[f.check])
                    for f in result.findings]
     obs = Observation(source=skill, data={"findings_count": len(result.findings)})
-    return SkillResult(skill=skill, success=True, observations=[obs], assessments=assessments)
+    raw = "\n".join(f.human_readable() for f in result.findings)   # what a chained verify_claim reads
+    return SkillResult(skill=skill, success=True, observations=[obs], assessments=assessments, raw=raw)
 
 
 def _scan_packages(**kwargs) -> SkillResult:

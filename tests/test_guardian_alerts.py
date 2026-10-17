@@ -25,7 +25,6 @@ These tests demand that phase 2 makes the skills return Assessments:
 
 They are written first; phase 2 changes the code to make them pass.
 """
-import types
 from pathlib import Path
 
 import pytest
@@ -120,14 +119,6 @@ def _setup_env(tmp_path: Path, monkeypatch) -> None:
         lambda self: [],
     )
 
-    # Safety net for the current subprocess-based skills: nothing real is
-    # scanned, and the run stays fast and deterministic.
-    monkeypatch.setattr(
-        "sentinel.skills.subprocess.run",
-        lambda *a, **k: types.SimpleNamespace(
-            stdout='{"findings": []}', stderr="", returncode=0
-        ),
-    )
 
 
 # ── Tests ──
@@ -393,3 +384,19 @@ def test_the_guardian_remembers_hardening_between_runs(tmp_path, monkeypatch):
         f"no new 'A' high alert should appear on the second run; "
         f"first={len(after_first)} second={len(after_second)}"
     )
+
+
+def test_a_chained_verifier_still_reads_the_findings(tmp_path, monkeypatch):
+    """The sensors used to pass their scan output forward as raw text, which run_chain hands to verify_claim as
+    scan_data. In-process, the findings' text has to go forward the same way, or every chained claim reads as
+    'Unverified claim' (CC's review of S2, 2026-10-17)."""
+    monkeypatch.setenv("SENTINEL_HOME", str(tmp_path / "state"))
+    finding = Finding(check="npm_supply_chain", severity="critical", title="Compromised package evil-pkg",
+                      description="evil-pkg 1.0.1 is on the known-bad list")
+    monkeypatch.setattr("sentinel.scanner.SentinelScanner.scan",
+                        lambda self: ScanResult(hostname="h", platform="p", scan_time="t", duration_ms=0.0,
+                                                findings=[finding]))
+    results = sentinel.skills.create_default_registry().run_chain(
+        ["scan_packages", "verify_claim"], claim="compromised package evil-pkg")
+    verdict = results[-1].assessments[0]
+    assert verdict.title == "Claim supported", verdict

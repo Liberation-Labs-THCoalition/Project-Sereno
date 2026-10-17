@@ -11,7 +11,6 @@ They are written first; phase 2 changes the code to make them pass.
 """
 import os
 import subprocess
-import types
 from pathlib import Path
 
 import pytest
@@ -63,13 +62,16 @@ def test_a_guardian_run_writes_only_under_sentinel_home(tmp_path, monkeypatch):
     monkeypatch.setenv("SENTINEL_HOME", str(state))
     monkeypatch.setenv("HOME", str(home))
 
-    # Replace the sensors so nothing real is scanned.
-    def fake_run(*args, **kwargs):
-        return types.SimpleNamespace(
-            stdout='{"findings": []}', stderr="", returncode=0
-        )
-
-    monkeypatch.setattr("sentinel.skills.subprocess.run", fake_run)
+    # Replace the sensors so nothing real is scanned. Since S2 they run in-process, so the four entry points are
+    # patched (a subprocess patch would no longer stop anything: CC's review of S2, 2026-10-17).
+    from sentinel.baseline import FileBaseline
+    from sentinel.profiler import SystemProfile
+    from sentinel.scanner import ScanResult
+    monkeypatch.setattr("sentinel.scanner.SentinelScanner.scan",
+                        lambda self: ScanResult(hostname="h", platform="p", scan_time="t", duration_ms=0.0))
+    monkeypatch.setattr("sentinel.baseline.FileBaseline.load", staticmethod(lambda *a, **k: FileBaseline()))
+    monkeypatch.setattr("sentinel.profiler.profile_system", lambda: SystemProfile(hostname="h"))
+    monkeypatch.setattr("advisor.hardening.HardeningAdvisor.assess", lambda self: [])
 
     class Recorder:
         def __init__(self):
