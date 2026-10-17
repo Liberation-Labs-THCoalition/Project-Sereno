@@ -85,8 +85,10 @@ python3 -m sentinel.guardian --force all
 
 # Set up the cron (every 4 hours)
 crontab -e
-# Add: 0 */4 * * * cd /path/to/community-defender && PYTHONPATH=. python3 -m sentinel.guardian >> ~/.sereno/guardian.log 2>&1
+# Add: 0 */4 * * * cd /path/to/community-defender && PYTHONPATH=. python3 -m sentinel.guardian >> ~/.sentinel/guardian.log 2>&1
 ```
+
+Sereno keeps all its state in one directory: `$SENTINEL_HOME`, or `~/.sentinel` when it isn't set. An install that kept its guardian state in `~/.ember` sets `SENTINEL_HOME=~/.ember` to keep it.
 
 The guardian maintains beliefs about your system state, desires for security, and intentions that fire skill chains automatically. It learns what's normal and alerts when something changes.
 
