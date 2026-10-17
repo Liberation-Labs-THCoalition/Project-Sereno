@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .paths import sentinel_home
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,12 +107,12 @@ class Skill:
 
 def _scan_packages(**kwargs) -> SkillResult:
     """Scan installed packages against known-bad lists."""
-    ember_dir = str(Path.home() / ".ember")
+    repo = str(Path(__file__).resolve().parents[1])
     try:
         r = subprocess.run(
             ["python3", "-m", "sentinel", "scan", "--checks", "npm_supply_chain,pip_supply_chain", "--json"],
             capture_output=True, text=True, timeout=120,
-            cwd=ember_dir, env={"PYTHONPATH": ember_dir, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
+            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
         )
         data = json.loads(r.stdout) if r.stdout.strip() else {}
         findings = data.get("findings", [])
@@ -122,12 +124,12 @@ def _scan_packages(**kwargs) -> SkillResult:
 
 def _scan_persistence(**kwargs) -> SkillResult:
     """Check for malware persistence mechanisms."""
-    ember_dir = str(Path.home() / ".ember")
+    repo = str(Path(__file__).resolve().parents[1])
     try:
         r = subprocess.run(
             ["python3", "-m", "sentinel", "scan", "--checks", "persistence,processes", "--json"],
             capture_output=True, text=True, timeout=120,
-            cwd=ember_dir, env={"PYTHONPATH": ember_dir, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
+            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
         )
         data = json.loads(r.stdout) if r.stdout.strip() else {}
         findings = data.get("findings", [])
@@ -139,12 +141,12 @@ def _scan_persistence(**kwargs) -> SkillResult:
 
 def _scan_network(**kwargs) -> SkillResult:
     """Check network listeners and connections."""
-    ember_dir = str(Path.home() / ".ember")
+    repo = str(Path(__file__).resolve().parents[1])
     try:
         r = subprocess.run(
             ["python3", "-m", "sentinel", "scan", "--checks", "network,credentials", "--json"],
             capture_output=True, text=True, timeout=120,
-            cwd=ember_dir, env={"PYTHONPATH": ember_dir, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
+            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
         )
         data = json.loads(r.stdout) if r.stdout.strip() else {}
         findings = data.get("findings", [])
@@ -156,12 +158,12 @@ def _scan_network(**kwargs) -> SkillResult:
 
 def _check_baseline(**kwargs) -> SkillResult:
     """Check file integrity against baseline."""
-    ember_dir = str(Path.home() / ".ember")
+    repo = str(Path(__file__).resolve().parents[1])
     try:
         r = subprocess.run(
             ["python3", "-m", "sentinel", "baseline", "check"],
             capture_output=True, text=True, timeout=120,
-            cwd=ember_dir, env={"PYTHONPATH": ember_dir, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
+            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
         )
         obs = Observation(source="baseline_check", raw_output=r.stdout[:3000])
         return SkillResult(skill="check_baseline", success=True, observations=[obs], raw=r.stdout[:3000])
@@ -171,12 +173,12 @@ def _check_baseline(**kwargs) -> SkillResult:
 
 def _profile_system(**kwargs) -> SkillResult:
     """Take a system profile snapshot."""
-    ember_dir = str(Path.home() / ".ember")
+    repo = str(Path(__file__).resolve().parents[1])
     try:
         r = subprocess.run(
             ["python3", "-m", "sentinel", "profile"],
             capture_output=True, text=True, timeout=60,
-            cwd=ember_dir, env={"PYTHONPATH": ember_dir, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
+            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
         )
         obs = Observation(source="system_profile", raw_output=r.stdout[:3000])
         return SkillResult(skill="profile_system", success=True, observations=[obs], raw=r.stdout[:3000])
@@ -186,12 +188,12 @@ def _profile_system(**kwargs) -> SkillResult:
 
 def _get_hardening(**kwargs) -> SkillResult:
     """Get hardening recommendations."""
-    ember_dir = str(Path.home() / ".ember")
+    repo = str(Path(__file__).resolve().parents[1])
     try:
         r = subprocess.run(
             ["python3", "-m", "sentinel", "harden"],
             capture_output=True, text=True, timeout=60,
-            cwd=ember_dir, env={"PYTHONPATH": ember_dir, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
+            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
         )
         obs = Observation(source="hardening", raw_output=r.stdout[:3000])
         return SkillResult(skill="get_hardening", success=True, observations=[obs], raw=r.stdout[:3000])
@@ -275,7 +277,7 @@ class BDIEngine:
     """
 
     def __init__(self, state_file: str = "") -> None:
-        self._state_file = Path(state_file) if state_file else Path.home() / ".ember" / "bdi_state.json"
+        self._state_file = Path(state_file) if state_file else sentinel_home() / "bdi_state.json"
         self.beliefs: dict[str, Belief] = {}
         self.desires: list[Desire] = []
         self.intentions: list[Intention] = []

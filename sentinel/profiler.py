@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .paths import sentinel_home
+
 
 @dataclass
 class SystemProfile:
@@ -197,7 +199,7 @@ def profile_system() -> SystemProfile:
 
 
 def save_profile(profile: SystemProfile, path: str = "") -> None:
-    save_path = Path(path) if path else Path.home() / ".sentinel" / "profile.json"
+    save_path = Path(path) if path else sentinel_home() / "profile.json"
     save_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = save_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(asdict(profile), indent=2))
@@ -205,7 +207,7 @@ def save_profile(profile: SystemProfile, path: str = "") -> None:
 
 
 def load_profile(path: str = "") -> Optional[SystemProfile]:
-    load_path = Path(path) if path else Path.home() / ".sentinel" / "profile.json"
+    load_path = Path(path) if path else sentinel_home() / "profile.json"
     if not load_path.exists():
         return None
     try:

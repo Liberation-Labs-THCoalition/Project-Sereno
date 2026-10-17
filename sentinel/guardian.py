@@ -24,12 +24,9 @@ from .skills import (
     SkillRegistry, BDIEngine, SkillResult,
 )
 from .alerts import AlertBus, StdoutAlert, FileAlert, DiscordWebhookAlert
+from .paths import sentinel_home
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [guardian] %(message)s")
 log = logging.getLogger(__name__)
-
-RESULTS_DIR = Path.home() / ".ember" / "guardian_runs"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def run_guardian(
@@ -89,7 +86,9 @@ def run_guardian(
                 )
 
     # Save run results
-    run_file = RESULTS_DIR / f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+    runs = sentinel_home() / "guardian_runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    run_file = runs / f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
     run_data = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "intentions_run": len(intentions),
@@ -114,6 +113,7 @@ def run_guardian(
 
 def main():
     import argparse
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [guardian] %(message)s")
     parser = argparse.ArgumentParser(description="Guardian — proactive security loop")
     parser.add_argument("--status", action="store_true", help="Show BDI state")
     parser.add_argument("--force", default="", help="Force intention(s): 'all' or desire name")

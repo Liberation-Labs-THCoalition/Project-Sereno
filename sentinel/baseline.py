@@ -31,6 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .paths import sentinel_home
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_WATCH_PATHS = [
@@ -263,7 +265,7 @@ class FileBaseline:
 
     def save(self, path: str = "") -> None:
         """Save baseline to disk."""
-        save_path = Path(path) if path else Path.home() / ".sentinel" / "baseline.json"
+        save_path = Path(path) if path else sentinel_home() / "baseline.json"
         save_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "created": self._created,
@@ -278,7 +280,7 @@ class FileBaseline:
     @classmethod
     def load(cls, path: str = "") -> FileBaseline:
         """Load baseline from disk."""
-        load_path = Path(path) if path else Path.home() / ".sentinel" / "baseline.json"
+        load_path = Path(path) if path else sentinel_home() / "baseline.json"
         baseline = cls()
         if not load_path.exists():
             return baseline
