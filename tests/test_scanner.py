@@ -63,7 +63,8 @@ class TestScanResult:
 
 
 class TestNpmSupplyChain:
-    def test_clean_with_no_modules(self, tmp_path):
+    def test_clean_with_no_modules(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
         known_bad = {"scopes": ["@evil"], "packages": {}}
         findings = check_npm_supply_chain(known_bad)
         # Won't find anything in home dir unless there are actual bad packages
@@ -89,9 +90,10 @@ class TestPipSupplyChain:
 
 
 class TestPersistence:
-    def test_clean_system(self):
+    def test_clean_system(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
         findings = check_persistence()
-        # On a clean dev machine, should find nothing critical
+        # An empty home has nothing critical
         for f in findings:
             assert f.severity != "critical", f"Unexpected critical finding: {f.title}"
 
