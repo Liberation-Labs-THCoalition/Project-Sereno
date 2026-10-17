@@ -63,7 +63,8 @@ class TestScanResult:
 
 
 class TestNpmSupplyChain:
-    def test_clean_with_no_modules(self, tmp_path):
+    def test_clean_with_no_modules(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
         known_bad = {"scopes": ["@evil"], "packages": {}}
         findings = check_npm_supply_chain(known_bad)
         # Won't find anything in home dir unless there are actual bad packages
@@ -89,9 +90,10 @@ class TestPipSupplyChain:
 
 
 class TestPersistence:
-    def test_clean_system(self):
+    def test_clean_system(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
         findings = check_persistence()
-        # On a clean dev machine, should find nothing critical
+        # An empty home has nothing critical
         for f in findings:
             assert f.severity != "critical", f"Unexpected critical finding: {f.title}"
 
@@ -153,7 +155,8 @@ class TestCredentials:
 
 
 class TestGitRepos:
-    def test_runs_without_error(self):
+    def test_runs_without_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
         findings = check_git_repos()
         assert isinstance(findings, list)
 
@@ -168,14 +171,16 @@ class TestGitRepos:
 
 
 class TestFullScanner:
-    def test_full_scan_runs(self):
+    def test_full_scan_runs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
         scanner = SentinelScanner()
         result = scanner.scan()
         assert isinstance(result, ScanResult)
         assert result.checks_run > 0
         assert result.hostname
 
-    def test_specific_checks(self):
+    def test_specific_checks(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
         scanner = SentinelScanner(checks=["persistence", "processes"])
         result = scanner.scan()
         assert result.checks_run == 2
