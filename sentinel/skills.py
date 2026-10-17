@@ -105,98 +105,85 @@ class Skill:
 
 # ── Sensor skills ──
 
+HARDENING_SEVERITY = {"critical": "critical", "important": "high", "suggested": "medium", "informational": "info"}
+
+
+def _findings_to_result(skill: str, checks: list[str]) -> SkillResult:
+    """Run the scanner in-process on these checks; one Assessment per Finding (rollout spec S2)."""
+    from .scanner import SentinelScanner
+    result = SentinelScanner(checks=checks).scan()
+    assessments = [Assessment(severity=f.severity, title=f.title, details=f.description, grounded_in=[f.check])
+                   for f in result.findings]
+    obs = Observation(source=skill, data={"findings_count": len(result.findings)})
+    return SkillResult(skill=skill, success=True, observations=[obs], assessments=assessments)
+
+
 def _scan_packages(**kwargs) -> SkillResult:
     """Scan installed packages against known-bad lists."""
-    repo = str(Path(__file__).resolve().parents[1])
     try:
-        r = subprocess.run(
-            ["python3", "-m", "sentinel", "scan", "--checks", "npm_supply_chain,pip_supply_chain", "--json"],
-            capture_output=True, text=True, timeout=120,
-            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
-        )
-        data = json.loads(r.stdout) if r.stdout.strip() else {}
-        findings = data.get("findings", [])
-        obs = Observation(source="package_scan", data={"findings_count": len(findings)}, raw_output=r.stdout[:3000])
-        return SkillResult(skill="scan_packages", success=True, observations=[obs], raw=r.stdout[:3000])
+        return _findings_to_result("scan_packages", ["npm_supply_chain", "pip_supply_chain"])
     except Exception as e:
         return SkillResult(skill="scan_packages", success=False, raw=str(e))
 
 
 def _scan_persistence(**kwargs) -> SkillResult:
     """Check for malware persistence mechanisms."""
-    repo = str(Path(__file__).resolve().parents[1])
     try:
-        r = subprocess.run(
-            ["python3", "-m", "sentinel", "scan", "--checks", "persistence,processes", "--json"],
-            capture_output=True, text=True, timeout=120,
-            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
-        )
-        data = json.loads(r.stdout) if r.stdout.strip() else {}
-        findings = data.get("findings", [])
-        obs = Observation(source="persistence_scan", data={"findings_count": len(findings)}, raw_output=r.stdout[:3000])
-        return SkillResult(skill="scan_persistence", success=True, observations=[obs], raw=r.stdout[:3000])
+        return _findings_to_result("scan_persistence", ["persistence", "processes"])
     except Exception as e:
         return SkillResult(skill="scan_persistence", success=False, raw=str(e))
 
 
 def _scan_network(**kwargs) -> SkillResult:
     """Check network listeners and connections."""
-    repo = str(Path(__file__).resolve().parents[1])
     try:
-        r = subprocess.run(
-            ["python3", "-m", "sentinel", "scan", "--checks", "network,credentials", "--json"],
-            capture_output=True, text=True, timeout=120,
-            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
-        )
-        data = json.loads(r.stdout) if r.stdout.strip() else {}
-        findings = data.get("findings", [])
-        obs = Observation(source="network_scan", data={"findings_count": len(findings)}, raw_output=r.stdout[:3000])
-        return SkillResult(skill="scan_network", success=True, observations=[obs], raw=r.stdout[:3000])
+        return _findings_to_result("scan_network", ["network", "credentials"])
     except Exception as e:
         return SkillResult(skill="scan_network", success=False, raw=str(e))
 
 
 def _check_baseline(**kwargs) -> SkillResult:
-    """Check file integrity against baseline."""
-    repo = str(Path(__file__).resolve().parents[1])
+    """Check file integrity against the baseline. An empty baseline is not a clean one."""
+    from .baseline import FileBaseline
     try:
-        r = subprocess.run(
-            ["python3", "-m", "sentinel", "baseline", "check"],
-            capture_output=True, text=True, timeout=120,
-            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
-        )
-        obs = Observation(source="baseline_check", raw_output=r.stdout[:3000])
-        return SkillResult(skill="check_baseline", success=True, observations=[obs], raw=r.stdout[:3000])
+        baseline = FileBaseline.load()
+        if not baseline._records:
+            assessments = [Assessment(severity="medium", title="No file-integrity baseline exists",
+                                      details="Run: python3 -m sentinel baseline create", grounded_in=["baseline"])]
+        else:
+            assessments = [Assessment(severity="high" if c.change_type in ("modified", "removed") else "medium",
+                                      title=f"File {c.change_type}: {c.path}", details=c.path, grounded_in=["baseline"])
+                           for c in baseline.check()]
+        obs = Observation(source="baseline_check", data={"assessments": len(assessments)})
+        return SkillResult(skill="check_baseline", success=True, observations=[obs], assessments=assessments)
     except Exception as e:
         return SkillResult(skill="check_baseline", success=False, raw=str(e))
 
 
 def _profile_system(**kwargs) -> SkillResult:
     """Take a system profile snapshot."""
-    repo = str(Path(__file__).resolve().parents[1])
+    from .profiler import profile_system
     try:
-        r = subprocess.run(
-            ["python3", "-m", "sentinel", "profile"],
-            capture_output=True, text=True, timeout=60,
-            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
-        )
-        obs = Observation(source="system_profile", raw_output=r.stdout[:3000])
-        return SkillResult(skill="profile_system", success=True, observations=[obs], raw=r.stdout[:3000])
+        p = profile_system()
+        return SkillResult(skill="profile_system", success=True, observations=[Observation(source="system_profile", data={"hostname": p.hostname})])
     except Exception as e:
         return SkillResult(skill="profile_system", success=False, raw=str(e))
 
 
-def _get_hardening(**kwargs) -> SkillResult:
-    """Get hardening recommendations."""
-    repo = str(Path(__file__).resolve().parents[1])
+def _get_hardening(bdi=None, **kwargs) -> SkillResult:
+    """Hardening recommendations, as assessments only when the set of titles changed since the last run."""
+    from advisor.hardening import HardeningAdvisor
     try:
-        r = subprocess.run(
-            ["python3", "-m", "sentinel", "harden"],
-            capture_output=True, text=True, timeout=60,
-            cwd=repo, env={"PYTHONPATH": repo, "PATH": "/usr/bin:/usr/local/bin:/opt/homebrew/bin"},
-        )
-        obs = Observation(source="hardening", raw_output=r.stdout[:3000])
-        return SkillResult(skill="get_hardening", success=True, observations=[obs], raw=r.stdout[:3000])
+        recs = HardeningAdvisor().assess()
+        titles = sorted(r.title for r in recs)
+        last = bdi.get_belief("last_hardening") if bdi is not None else None
+        changed = last != titles
+        if bdi is not None:
+            bdi.believe("last_hardening", titles, source="get_hardening")
+        assessments = [Assessment(severity=HARDENING_SEVERITY.get(r.severity, "high"), title=r.title, details=r.what,
+                                  grounded_in=["hardening"]) for r in recs] if changed else []
+        obs = Observation(source="hardening", data={"recommendations": len(recs), "changed": changed})
+        return SkillResult(skill="get_hardening", success=True, observations=[obs], assessments=assessments)
     except Exception as e:
         return SkillResult(skill="get_hardening", success=False, raw=str(e))
 

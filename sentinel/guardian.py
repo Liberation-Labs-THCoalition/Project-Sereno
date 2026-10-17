@@ -58,7 +58,7 @@ def run_guardian(
 
     for intention in intentions:
         log.info("Intention: %s → %s", intention.desire, " → ".join(intention.skills))
-        results = registry.run_chain(intention.skills)
+        results = registry.run_chain(intention.skills, bdi=bdi)
         all_results.extend(results)
         bdi.mark_run(intention)
 
