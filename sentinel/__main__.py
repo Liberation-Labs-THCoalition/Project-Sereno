@@ -13,7 +13,10 @@ Usage:
   python -m sentinel all                   # Everything: scan + harden + baseline
 """
 import argparse
+import json
 import sys
+from dataclasses import asdict
+from pathlib import Path
 
 from .scanner import SentinelScanner
 from .alerts import AlertBus, StdoutAlert, FileAlert, DiscordWebhookAlert
@@ -37,7 +40,10 @@ def cmd_scan(args) -> int:
     bus = AlertBus(transports)
 
     if args.json:
-        output = scanner.scan_to_json(args.output)
+         # One scan: the JSON printed is the result that chose the alerts and the exit code (rollout spec S4).
+        output = json.dumps(asdict(result), indent=2)
+        if args.output:
+            Path(args.output).write_text(output)
         if not args.cron or result.findings:
             print(output)
     else:
