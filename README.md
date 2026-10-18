@@ -14,7 +14,7 @@ Sereno watches your machine for security threats and tells you what it finds in 
 - **Monitors** file integrity against a known-good baseline
 - **Advises** on hardening — what to fix and how, in plain language
 - **Alerts** through channels you actually check (Discord, terminal, log files)
-- **Thinks** proactively about what to check and when (BDI reasoning engine)
+- **Watches** on a schedule while you sleep: five standing checks, each on its own interval
 
 ## Quick Start
 
@@ -73,7 +73,7 @@ python3 -m sentinel scan --cron
 
 ## Proactive Guardian
 
-Sereno includes a BDI (Beliefs-Desires-Intentions) engine that decides what to check and when. Set it on a cron and it watches while you sleep.
+Sereno's guardian keeps five standing checks, each on its own schedule, and runs whichever are due. Set it on a cron and it watches while you sleep.
 
 ```bash
 # See what the guardian believes, desires, and intends
@@ -92,7 +92,19 @@ crontab -e
 
 Sereno keeps all its state in one directory: `$SENTINEL_HOME`, or `~/.sentinel` when it isn't set. An install that kept its guardian state in `~/.ember` sets `SENTINEL_HOME=~/.ember` to keep it.
 
-The guardian maintains beliefs about your system state, desires for security, and intentions that fire skill chains automatically. It learns what's normal and alerts when something changes.
+What the guardian does on each run:
+- **Packages and persistence**, every 4 hours: any critical or high finding alerts (a compromised package, malware
+  persistence). Medium and lower are counted in the run record and shown in full by a one-shot scan, but don't alert.
+- **Network and credentials**, every 8 hours: the same rule. Ports you've listed as expected are reported as info and
+  never hidden.
+- **File integrity**, every 8 hours: a changed or removed file alerts as high. With no baseline yet it says so (medium),
+  rather than reporting the machine as clean: run `python3 -m sentinel baseline create` once.
+- **Hardening**, once a day: it alerts only when the set of recommendations has changed since the last run, so the same
+  advice doesn't page you every day.
+- A check that fails always alerts and marks the run failed. It never reports "all clear".
+
+What it doesn't do: it doesn't learn what is normal for your machine beyond the baseline you create and the last set of
+hardening advice, it uses no AI model, and it sends nothing anywhere unless you turn on Discord alerts.
 
 ## Threat Feeds
 
