@@ -90,7 +90,7 @@ crontab -e
 # Add: 0 */4 * * * cd /path/to/community-defender && PYTHONPATH=. python3 -m sentinel.guardian >> ~/.sentinel/guardian.log 2>&1
 ```
 
-Sereno keeps all its state in one directory: `$SENTINEL_HOME`, or `~/.sentinel` when it isn't set. An install that kept its guardian state in `~/.ember` sets `SENTINEL_HOME=~/.ember` to keep it.
+Sereno keeps all its state in one directory: `$SENTINEL_HOME`, or `~/.sentinel` when it isn't set. An install from before 2026-10-17 that kept its guardian state in `~/.ember` had its baseline and profile in `~/.sentinel`: copy `baseline.json` and `profile.json` into `~/.ember` first, then set `SENTINEL_HOME=~/.ember`. Otherwise the guardian keeps its beliefs but reports that no baseline exists.
 
 What the guardian does on each run:
 - **Packages and persistence**, every 4 hours: any critical or high finding alerts (a compromised package, malware
