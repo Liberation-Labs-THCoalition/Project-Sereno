@@ -434,9 +434,27 @@ def check_processes() -> list[Finding]:
 
 # ── Check: Network ──
 
+def _expected_ports() -> tuple:
+    """(ports the operator runs on purpose, a Finding when expected.json can't be read). Ports compare as strings."""
+    from .paths import sentinel_home
+    path = sentinel_home() / "expected.json"
+    if not path.exists():
+        return set(), None
+    try:
+        data = json.loads(path.read_text())
+        return {str(p) for p in data.get("ports", [])}, None
+    except (OSError, ValueError, AttributeError, TypeError) as e:
+        return set(), Finding(check="network", severity="medium", title="expected.json unreadable",
+                              description=f"{path} could not be read ({type(e).__name__}), so no port is treated as expected.",
+                              remediation=f"Fix or remove {path}.", details={"path": str(path)})
+
+
 def check_network() -> list[Finding]:
     """Check for unexpected listening ports and connections."""
     findings = []
+    expected, problem = _expected_ports()
+    if problem is not None:
+        findings.append(problem)
 
     if _is_linux() or _is_macos():
         if _is_macos():
@@ -445,10 +463,7 @@ def check_network() -> list[Finding]:
             output, rc = _run(["ss", "-tlnp"])
 
         if rc == 0 and output:
-            known_safe_ports = {
-                "22", "80", "443", "8080", "11434", "11440",
-                "5432", "5434", "4222", "3000", "8081",
-            }
+            known_safe_ports = {"22", "80", "443"}
             for line in output.splitlines()[1:]:
                 parts = line.split()
                 for part in parts:
@@ -456,14 +471,24 @@ def check_network() -> list[Finding]:
                     if port_match:
                         port = port_match.group(1)
                         if port not in known_safe_ports and int(port) > 1024:
-                            findings.append(Finding(
-                                check="network",
-                                severity="medium",
-                                title=f"Unexpected listening port: {port}",
-                                description=f"Something is listening on port {port}. Line: {line.strip()[:120]}",
-                                remediation=f"Check what's using port {port}. If you don't recognize it, investigate.",
-                                details={"port": port, "line": line.strip()},
-                            ))
+                            if port in expected:
+                                findings.append(Finding(
+                                    check="network",
+                                    severity="info",
+                                    title=f"Listening port {port} (expected by operator)",
+                                    description=f"Port {port} is listed in expected.json. Line: {line.strip()[:120]}",
+                                    remediation="",
+                                    details={"port": port, "line": line.strip(), "expected": True},
+                                ))
+                            else:
+                                findings.append(Finding(
+                                    check="network",
+                                    severity="medium",
+                                    title=f"Unexpected listening port: {port}",
+                                    description=f"Something is listening on port {port}. Line: {line.strip()[:120]}",
+                                    remediation=f"Check what's using port {port}. If you don't recognize it, investigate.",
+                                    details={"port": port, "line": line.strip()},
+                                ))
                         break
 
     return findings

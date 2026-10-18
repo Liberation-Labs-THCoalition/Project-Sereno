@@ -52,6 +52,8 @@ No dependencies beyond Python 3.8+. No pip install. Clone and run.
 | **Git repos** | Exfiltration branches (Shai-Hulud indicators) |
 | **File integrity** | Changes to critical files since last baseline |
 
+**Expected ports.** Sereno reports every listening port above 1024. To mark the ones you run on purpose, list them in `$SENTINEL_HOME/expected.json` (default `~/.sentinel/expected.json`) as `{"ports": [11434, 5432]}`. They are still reported, as info ("expected by operator"), so you can always see what is listening, but they won't alert.
+
 ## Alerts
 
 ```bash
