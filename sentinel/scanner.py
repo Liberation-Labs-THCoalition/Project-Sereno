@@ -386,32 +386,87 @@ def check_persistence() -> list[Finding]:
         except OSError:
             continue
 
-    # Python .pth file injection
-    for pth in home.rglob("*.pth"):
-        if "site-packages" not in str(pth):
-            continue
+    # Python startup hooks: a .pth line starting with "import" runs at every interpreter start, and so does a
+    # sitecustomize.py or usercustomize.py. litellm 1.107.0's malware (2026-10-21) used a .pth whose only line was
+    # `import cook`, which the old exec()/eval() keyword check couldn't see.
+    pths, customizes = _startup_files(home)
+    for pth in pths:
         try:
-            content = pth.read_text()
-            known_safe = [
-                "distutils-precedence.pth", "_virtualenv.pth",
-                "coloredlogs.pth", "easy-install.pth",
-            ]
-            if pth.name in known_safe:
-                continue
-            if any(sus in content for sus in ["exec(", "eval(", "subprocess", "os.system", "urllib"]):
-                if "SETUPTOOLS_USE_DISTUTILS" not in content and "coloredlogs" not in content:
-                    findings.append(Finding(
-                        check="persistence",
-                        severity="high",
-                        title=f"Suspicious .pth file: {pth.name}",
-                        description=f"Python startup file {pth} contains executable code that doesn't match known-safe patterns.",
-                        remediation=f"Review the contents of {pth} and remove if not recognized.",
-                        details={"path": str(pth), "content": content[:200]},
-                    ))
+            content = pth.read_text(errors="replace")
         except OSError:
             continue
+        severity, reason = pth_verdict(pth.name, content)
+        if severity:
+            findings.append(Finding(
+                check="persistence",
+                severity=severity,
+                title=f"Python startup file runs code: {pth.name}",
+                description=(f"{pth} {reason} Python runs it every time it starts in that environment. "
+                             f"Legitimate packages occasionally do this, so look before you act."),
+                remediation=(f"Check which package installed {pth.name} (pip show, or look for a matching "
+                             f"*.dist-info folder beside it). If you don't recognise it, remove it and the package, "
+                             f"then treat that environment's secrets as exposed."),
+                details={"path": str(pth), "content": content[:200]},
+            ))
+    for f in customizes:
+        findings.append(Finding(
+            check="persistence",
+            severity="high",
+            title=f"Python startup file: {f}",
+            description=(f"Python imports {f.name} every time it starts in that environment, and most "
+                         f"environments have none. litellm 1.107.0's malware installed one as an hourly "
+                         f"remote code loader."),
+            remediation=f"Read {f}. If you didn't put it there, remove it and treat that environment's secrets "
+                        f"as exposed.",
+            details={"path": str(f)},
+        ))
 
     return findings
+
+
+# Startup hooks that are normal, recognised by name AND content, so a file can't pass by borrowing a name.
+_PTH_SAFE = [
+    (re.compile(r"^_virtualenv\.pth$"), re.compile(r"^import _virtualenv\s*$")),
+    (re.compile(r"^distutils-precedence\.pth$"), re.compile(r"SETUPTOOLS_USE_DISTUTILS")),
+    (re.compile(r"^__editable__\..*\.pth$"),
+     re.compile(r"^import (__editable___\w+_finder); \1\.install\([^()]*\)\s*$")),
+    (re.compile(r"coverage.*\.pth$"), re.compile(r"COVERAGE_PROCESS_START")),
+    (re.compile(r"^pytest-cov\.pth$"), re.compile(r"COV_CORE_SOURCE")),
+    (re.compile(r"-nspkg\.pth$"), re.compile(r"sys\.modules\.setdefault|importlib\.util|types\.ModuleType")),
+    (re.compile(r"^coloredlogs\.pth$"), re.compile(r"coloredlogs")),
+]
+_PTH_RISKY = re.compile(r"exec\(|eval\(|compile\(|base64|b64decode|zlib|marshal|subprocess|os\.system|"
+                        r"urllib|socket|http\.client|__import__")
+
+
+def _startup_files(home: Path):
+    """(.pth files, sitecustomize/usercustomize files) inside site-packages or dist-packages under home, found in ONE
+    walk (one walk per pattern would multiply the time on a Pi). Links aren't followed; node_modules and .git are
+    skipped."""
+    pths, customizes = [], []
+    for dirpath, dirnames, filenames in os.walk(str(home), followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in ("node_modules", ".git")]
+        if "site-packages" not in dirpath and "dist-packages" not in dirpath:
+            continue
+        for f in filenames:
+            if f.endswith(".pth"):
+                pths.append(Path(dirpath) / f)
+            elif f in ("sitecustomize.py", "usercustomize.py"):
+                customizes.append(Path(dirpath) / f)
+    return pths, customizes
+
+
+def pth_verdict(name: str, content: str):
+    """(severity, reason) for a .pth file, or (None, "") when it runs nothing or is a known-normal hook."""
+    imports = [line for line in content.splitlines() if re.match(r"^import[ \t]", line)]
+    if not imports:
+        return None, ""  # path lines only: Python adds them to sys.path and runs nothing
+    for name_re, content_re in _PTH_SAFE:
+        if name_re.search(name) and all(content_re.search(line) for line in imports):
+            return None, ""
+    if _PTH_RISKY.search(content):
+        return "high", "has an import line that runs code (exec, decoding, a shell or the network)."
+    return "high", "has an import line, which runs code."
 
 
 # ── Check: Processes ──
