@@ -1,13 +1,31 @@
 {
   "_meta": {
     "name": "Sereno — Known-Bad PyPI Packages",
-    "updated": "2026-05-13",
-    "source": "CVE-2026-45321 (Mini Shai-Hulud)",
-    "description": "Maps package name (lowercase) to list of known-bad versions. Empty list = all versions suspect."
+    "updated": "2026-10-23",
+    "source": "OSV malware records MAL-2026-2144 (litellm), MAL-2026-2254 / GHSA-955r-262c-33jc (telnyx), MAL-2026-3201 (lightning), GHSA-w37p-236h-pfx3 (pytorch-lightning), MAL-2026-3607/3608 (guardrails-ai, mistralai; CVE-2026-45321, Mini Shai-Hulud)",
+    "description": "Maps package name (lowercase) to its known-bad versions. An empty list means the package had compromised releases but the exact versions aren't listed: reported as high, never skipped."
   },
-  "mistralai": ["2.4.6"],
-  "guardrails-ai": ["0.10.1"],
-  "litellm": [],
-  "telnyx": [],
-  "lightning": []
+  "mistralai": [
+    "2.4.6"
+  ],
+  "guardrails-ai": [
+    "0.10.1"
+  ],
+  "litellm": [
+    "1.82.7",
+    "1.82.8",
+    "1.107.0"
+  ],
+  "telnyx": [
+    "4.87.1",
+    "4.87.2"
+  ],
+  "lightning": [
+    "2.6.2",
+    "2.6.3"
+  ],
+  "pytorch-lightning": [
+    "2.6.2",
+    "2.6.3"
+  ]
 }

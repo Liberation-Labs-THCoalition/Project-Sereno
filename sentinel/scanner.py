@@ -230,8 +230,15 @@ def check_pip_supply_chain(known_bad: dict | None = None) -> list[Finding]:
     for pkg in packages:
         name = pkg.get("name", "").lower()
         version = pkg.get("version", "")
-        bad_versions = known_bad.get(name, [])
-        if bad_versions and (not bad_versions[0] or version in bad_versions):
+        bad_versions = known_bad.get(name)
+        if name.startswith("_") or bad_versions is None:
+            continue
+        # An empty list means "had compromised releases, versions not listed". Until 2026-10-23 such entries were
+        # skipped entirely, so a clean result said nothing about them.
+        exact = version in bad_versions
+        if any(bad_versions) and not exact:
+            continue
+        if exact:
             findings.append(Finding(
                 check="supply_chain_pip",
                 severity="critical",
@@ -242,6 +249,18 @@ def check_pip_supply_chain(known_bad: dict | None = None) -> list[Finding]:
                 ),
                 remediation=f"Run: pip uninstall {name} && pip install {name}==(known good version)",
                 details={"package": name, "version": version},
+            ))
+        else:
+            findings.append(Finding(
+                check="supply_chain_pip",
+                severity="high",
+                title=f"Package with compromised releases: {name}=={version}",
+                description=(
+                    f"{name} had compromised releases, and Sereno's list doesn't say which versions. "
+                    f"Check {version} against the package's security advisory."
+                ),
+                remediation=f"Look up {name}'s advisory (osv.dev lists them) and upgrade past any bad version.",
+                details={"package": name, "version": version, "versions_listed": False},
             ))
 
     return findings
