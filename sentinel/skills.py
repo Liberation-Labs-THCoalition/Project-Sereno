@@ -144,14 +144,15 @@ def _scan_network(**kwargs) -> SkillResult:
 
 def _check_baseline(**kwargs) -> SkillResult:
     """Check file integrity against the baseline. An empty baseline is not a clean one."""
-    from .baseline import FileBaseline
+    from .baseline import FileBaseline, escalates
     try:
         baseline = FileBaseline.load()
         if not baseline._records:
             assessments = [Assessment(severity="medium", title="No file-integrity baseline exists",
                                       details="Run: python3 -m sentinel baseline create", grounded_in=["baseline"])]
         else:
-            assessments = [Assessment(severity="high" if c.change_type in ("modified", "removed") else "medium",
+            assessments = [Assessment(severity="high" if c.change_type in ("modified", "removed") or escalates(c)
+                                      else "medium",
                                       title=f"File {c.change_type}: {c.path}", details=c.path, grounded_in=["baseline"])
                            for c in baseline.check()]
         obs = Observation(source="baseline_check", data={"assessments": len(assessments)})

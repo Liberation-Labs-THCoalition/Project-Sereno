@@ -63,6 +63,18 @@ SKIP_PATTERNS = [
     ".cache", ".npm/_cacache", "Cache", "CacheStorage",
 ]
 
+# Inside ~/.claude, only what can change Claude Code's behaviour is watched: its settings, hooks, commands, agents,
+# skills, instructions, and the lists of installed plugins. The rest (session transcripts, todos, shell snapshots,
+# plugin caches) changes every few minutes, and watching it raised a high alert on every guardian run for every Claude
+# Code user (found 2026-10-23: 80 changes in 8 hours on one machine). The rule applies at scan time, so a baseline
+# saved with "~/.claude" in its watch list gets it too.
+CLAUDE_KEEP_TOP = {"settings.json", "settings.local.json", "CLAUDE.md", "hooks", "commands", "agents", "skills",
+                   "keybindings.json"}
+CLAUDE_KEEP_FILES = {"plugins/installed_plugins.json", "plugins/known_marketplaces.json"}
+
+# setuid and setgid: a file gaining one can run with its owner's or group's rights
+ESCALATING_BITS = 0o6000
+
 
 @dataclass
 class FileRecord:
@@ -74,6 +86,7 @@ class FileRecord:
     permissions: str
     uid: int = 0
     gid: int = 0
+    owner_known: bool = True  # False for a record loaded from a baseline saved without uid/gid
 
 
 @dataclass
@@ -87,6 +100,8 @@ class FileChange:
     new_permissions: str = ""
     old_size: int = 0
     new_size: int = 0
+    old_owner: str = ""
+    new_owner: str = ""
 
     def human_readable(self) -> str:
         if self.change_type == "added":
@@ -97,6 +112,8 @@ class FileChange:
             return f"  CHANGED: {self.path} (content differs, {self.old_size}→{self.new_size} bytes)"
         elif self.change_type == "permissions_changed":
             return f"  PERMS: {self.path} ({self.old_permissions}→{self.new_permissions})"
+        elif self.change_type == "owner_changed":
+            return f"  OWNER: {self.path} (uid:gid {self.old_owner}→{self.new_owner})"
         return f"  ???: {self.path} ({self.change_type})"
 
 
@@ -112,16 +129,47 @@ def _hash_file(path: Path) -> str:
         return ""
 
 
+def _claude_churn(path: Path) -> bool:
+    """A path under ~/.claude that isn't one of the watched parts (CLAUDE_KEEP_TOP, CLAUDE_KEEP_FILES)."""
+    claude = (Path.home() / ".claude").resolve()
+    try:
+        rel = Path(path).resolve().relative_to(claude)
+    except (ValueError, OSError):
+        return False
+    if not rel.parts:
+        return False
+    if rel.parts[0] in CLAUDE_KEEP_TOP:
+        return False
+    rel_s = rel.as_posix()
+    if rel_s in CLAUDE_KEEP_FILES or any(k.startswith(rel_s + "/") for k in CLAUDE_KEEP_FILES):
+        return False  # a kept file, or a folder on the way to one
+    return True
+
+
 def _should_skip(path: Path) -> bool:
     """Check if path matches any skip patterns."""
     path_str = str(path)
-    return any(skip in path_str for skip in SKIP_PATTERNS)
+    return any(skip in path_str for skip in SKIP_PATTERNS) or _claude_churn(path)
+
+
+def escalates(change) -> bool:
+    """A change that gives something more power: a new owner, or a setuid/setgid bit that wasn't there."""
+    if change.change_type == "owner_changed":
+        return True
+    if change.change_type != "permissions_changed":
+        return False
+    try:
+        old, new = int(change.old_permissions, 8), int(change.new_permissions, 8)
+    except (TypeError, ValueError):
+        return False
+    return bool(new & ESCALATING_BITS & ~old)
 
 
 def _file_permissions(path: Path) -> str:
-    """Get file permissions as octal string."""
+    """Permissions as an octal string, setuid, setgid and sticky bits included ("755", "4755"). Before 2026-10-23
+    only the last three digits were kept, so a setuid bit added to a file went unseen."""
     try:
-        return oct(path.stat().st_mode)[-3:]
+        return "%o" % (path.stat().st_mode & 0o7777)
     except OSError:
         return "???"
 
@@ -246,9 +294,17 @@ class FileBaseline:
                         old_permissions=baseline.permissions,
                         new_permissions=record.permissions,
                     ))
+                elif baseline.owner_known and (record.uid, record.gid) != (baseline.uid, baseline.gid):
+                    changes.append(FileChange(
+                        path=record.path,
+                        change_type="owner_changed",
+                        old_owner=f"{baseline.uid}:{baseline.gid}",
+                        new_owner=f"{record.uid}:{record.gid}",
+                    ))
 
         for path_str, record in self._records.items():
-            if path_str not in current_paths:
+            # A record the skip rules now exclude (a Claude Code transcript in an older baseline) isn't "gone"
+            if path_str not in current_paths and not _should_skip(Path(path_str)):
                 changes.append(FileChange(
                     path=path_str,
                     change_type="removed",
@@ -289,6 +345,8 @@ class FileBaseline:
             baseline._created = data.get("created", "")
             baseline._watch_paths = data.get("watch_paths", [])
             for path_str, rec_data in data.get("records", {}).items():
+                rec_data = dict(rec_data)
+                rec_data.setdefault("owner_known", "uid" in rec_data and "gid" in rec_data)
                 baseline._records[path_str] = FileRecord(**rec_data)
         except (json.JSONDecodeError, TypeError, OSError) as e:
             logger.warning("Failed to load baseline: %s", e)
