@@ -121,7 +121,7 @@ def _findings_to_result(skill: str, checks: list[str]) -> SkillResult:
 def _scan_packages(**kwargs) -> SkillResult:
     """Scan installed packages against known-bad lists."""
     try:
-        return _findings_to_result("scan_packages", ["npm_supply_chain", "pip_supply_chain"])
+        return _findings_to_result("scan_packages", ["npm_supply_chain", "pip_supply_chain", "mcp_servers"])
     except Exception as e:
         return SkillResult(skill="scan_packages", success=False, raw=str(e))
 

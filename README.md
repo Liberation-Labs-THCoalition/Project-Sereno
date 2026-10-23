@@ -51,6 +51,7 @@ No dependencies beyond Python 3.8+. No pip install. Clone and run.
 | **Credentials** | Exposed tokens in .npmrc, API keys in .env files |
 | **Git repos** | Exfiltration branches (Shai-Hulud indicators) |
 | **File integrity** | Changes to critical files since last baseline |
+| **MCP servers** | AI coding tools (Claude Code, Claude Desktop, Cursor, VS Code, Windsurf, Gemini CLI, Codex) starting MCP servers with no fixed version (`npx -y some-server`, `uvx some-server`), and API keys written in plain text in their configs (named, never shown) |
 
 **Expected ports.** Sereno reports every listening port above 1024. To mark the ones you run on purpose, list them in `$SENTINEL_HOME/expected.json` (default `~/.sentinel/expected.json`) as `{"ports": [11434, 5432]}`. They are still reported, as info ("expected by operator"), so you can always see what is listening, but they won't alert.
 
@@ -149,5 +150,8 @@ Hippocratic License 3.0, with Liberation Labs' modules: see [LICENSE.md](LICENSE
 ## Credits
 
 Built by [Liberation Labs](https://github.com/Liberation-Labs-THCoalition). Architecture: CC. Direction: Thomas Edrington.
+
+The MCP server check follows an idea from [stack-guard](https://github.com/SolanceLab/stack-guard) by SolanceLab (MIT),
+which flags unpinned MCP servers for Claude Code users.
 
 *Stay safe out there.*

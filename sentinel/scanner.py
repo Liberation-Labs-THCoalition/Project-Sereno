@@ -599,6 +599,18 @@ def load_known_bad_pip() -> dict:
     return {}
 
 
+# ── Check: MCP servers (sentinel/mcp.py) ──
+
+def check_mcp() -> list[Finding]:
+    """MCP servers launched with no fixed version, and MCP configs holding secrets in plain text."""
+    from .mcp import check_mcp_servers
+
+    def make(severity, title, description, remediation, details):
+        return Finding(check="mcp_servers", severity=severity, title=title, description=description,
+                       remediation=remediation, details=details)
+    return check_mcp_servers(make, _home(), load_known_bad_npm(), load_known_bad_pip())
+
+
 # ── Main Scanner ──
 
 class SentinelScanner:
@@ -607,7 +619,7 @@ class SentinelScanner:
     def __init__(self, checks: list[str] | None = None) -> None:
         self._checks = checks or [
             "npm_supply_chain", "pip_supply_chain", "persistence",
-            "processes", "network", "credentials", "git_repos",
+            "processes", "network", "credentials", "git_repos", "mcp_servers",
         ]
 
     def scan(self) -> ScanResult:
@@ -631,6 +643,7 @@ class SentinelScanner:
             "network": check_network,
             "credentials": check_credentials,
             "git_repos": check_git_repos,
+            "mcp_servers": check_mcp,
         }
 
         for check_name in self._checks:
