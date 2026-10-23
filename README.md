@@ -19,8 +19,8 @@ Sereno watches your machine for security threats and tells you what it finds in 
 ## Quick Start
 
 ```bash
-git clone https://github.com/Liberation-Labs-THCoalition/community-defender.git
-cd community-defender
+git clone https://github.com/Liberation-Labs-THCoalition/Project-Sereno.git
+cd Project-Sereno
 
 # Full assessment — scan, harden, baseline, everything
 python3 -m sentinel all
@@ -88,7 +88,7 @@ python3 -m sentinel.guardian --force all
 
 # Set up the cron (every 4 hours)
 crontab -e
-# Add: 0 */4 * * * cd /path/to/community-defender && PYTHONPATH=. python3 -m sentinel.guardian >> ~/.sentinel/guardian.log 2>&1
+# Add: 0 */4 * * * cd /path/to/Project-Sereno && PYTHONPATH=. python3 -m sentinel.guardian >> ~/.sentinel/guardian.log 2>&1
 ```
 
 Sereno keeps all its state in one directory: `$SENTINEL_HOME`, or `~/.sentinel` when it isn't set. An install from before 2026-10-17 that kept its guardian state in `~/.ember` had its baseline and profile in `~/.sentinel`: copy `baseline.json` and `profile.json` into `~/.ember` first, then set `SENTINEL_HOME=~/.ember`. Otherwise the guardian keeps its beliefs but reports that no baseline exists.

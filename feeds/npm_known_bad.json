@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "name": "Community Defender — Known-Bad npm Packages",
+    "name": "Sereno — Known-Bad npm Packages",
     "updated": "2026-05-13",
     "source": "CVE-2026-45321 (Mini Shai-Hulud), community reports",
     "description": "Compromised npm package scopes and specific versions. Scopes list means ANY package under that scope may be affected. Packages dict maps name to list of known-bad versions (empty list = all versions suspect)."

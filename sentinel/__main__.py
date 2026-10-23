@@ -1,4 +1,4 @@
-"""Community Defender — security for the rest of us.
+"""Sereno — security for the rest of us.
 
 Usage:
   python -m sentinel                       # Full scan, print report
@@ -169,7 +169,7 @@ def cmd_all(args) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sentinel",
-        description="Community Defender — security for the rest of us",
+        description="Sereno — security for the rest of us",
     )
     sub = parser.add_subparsers(dest="command")
 

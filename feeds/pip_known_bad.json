@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "name": "Community Defender — Known-Bad PyPI Packages",
+    "name": "Sereno — Known-Bad PyPI Packages",
     "updated": "2026-05-13",
     "source": "CVE-2026-45321 (Mini Shai-Hulud)",
     "description": "Maps package name (lowercase) to list of known-bad versions. Empty list = all versions suspect."
