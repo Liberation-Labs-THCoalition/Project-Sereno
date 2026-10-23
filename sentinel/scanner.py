@@ -342,31 +342,13 @@ def check_persistence() -> list[Finding]:
             details={"path": str(found)},
         ))
 
-    # Claude Code hook injection
-    claude_settings = home / ".claude" / "settings.json"
-    if claude_settings.exists():
-        try:
-            data = json.loads(claude_settings.read_text())
-            hooks = data.get("hooks", {})
-            for event_type, hook_list in hooks.items():
-                if isinstance(hook_list, list):
-                    for hook_group in hook_list:
-                        for hook in hook_group.get("hooks", []):
-                            cmd = hook.get("command", "")
-                            if any(sus in cmd.lower() for sus in [
-                                "router_init", "tanstack", "shai", "token-monitor",
-                                "curl ", "wget ", "nc ", "base64",
-                            ]):
-                                findings.append(Finding(
-                                    check="persistence",
-                                    severity="critical",
-                                    title=f"Suspicious Claude Code hook: {event_type}",
-                                    description=f"Hook command looks malicious: {cmd[:100]}",
-                                    remediation="Remove the hook from .claude/settings.json",
-                                    details={"event": event_type, "command": cmd},
-                                ))
-        except (json.JSONDecodeError, OSError):
-            pass
+    # Claude Code settings: hooks and API-endpoint overrides, user-level and in project folders (sentinel/claude_settings.py)
+    from .claude_settings import check_claude_settings
+
+    def make(severity, title, description, remediation, details):
+        return Finding(check="persistence", severity=severity, title=title, description=description,
+                       remediation=remediation, details=details)
+    findings.extend(check_claude_settings(make, home))
 
     # VS Code task injection
     for tasks_json in home.rglob(".vscode/tasks.json"):

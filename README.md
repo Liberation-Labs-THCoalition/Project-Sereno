@@ -45,15 +45,15 @@ No dependencies beyond Python 3.8+. No pip install. Clone and run.
 | Check | What it looks for |
 |-------|-------------------|
 | **Supply chain** | npm/pip packages on known-compromised lists |
-| **Persistence** | Malware hooks in Claude Code, VS Code, LaunchAgents, systemd, .pth files |
+| **Persistence** | Malware hooks in Claude Code (your settings and each project's, including projects that redirect Claude Code's API traffic), VS Code, LaunchAgents, systemd, and Python startup files (`.pth` import lines, `sitecustomize.py`) |
 | **Processes** | Cryptominers, reverse shells, token monitors |
-| **Network** | Unexpected listening ports |
+| **Network** | Unexpected listening ports: every TCP listener (ones only this machine can reach are info) and low-port UDP services |
 | **Credentials** | Exposed tokens in .npmrc, API keys in .env files |
 | **Git repos** | Exfiltration branches (Shai-Hulud indicators) |
 | **File integrity** | Changes to critical files since last baseline |
 | **MCP servers** | AI coding tools (Claude Code, Claude Desktop, Cursor, VS Code, Windsurf, Gemini CLI, Codex) starting MCP servers with no fixed version (`npx -y some-server`, `uvx some-server`), and API keys written in plain text in their configs (named, never shown) |
 
-**Expected ports.** Sereno reports every listening port above 1024. To mark the ones you run on purpose, list them in `$SENTINEL_HOME/expected.json` (default `~/.sentinel/expected.json`) as `{"ports": [11434, 5432]}`. They are still reported, as info ("expected by operator"), so you can always see what is listening, but they won't alert.
+**Expected ports.** Sereno reports every listening TCP port except 22, 80 and 443, and UDP services on ports up to 1024; a port only this machine can reach (127.0.0.1, ::1) is info. To mark the ones you run on purpose, list them in `$SENTINEL_HOME/expected.json` (default `~/.sentinel/expected.json`) as `{"ports": [11434, 5432]}`. They are still reported, as info ("expected by operator"), so you can always see what is listening, but they won't alert.
 
 ## Alerts
 
