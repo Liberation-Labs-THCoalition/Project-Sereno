@@ -111,11 +111,12 @@ class ScanResult:
             n = len(self.issues)
             lines.append(f"{n} issue{'s' if n != 1 else ''} found"
                          + (f", and {notes} note{'s' if notes != 1 else ''}" if notes else "") + ":\n")
-            for sev in ["critical", "high", "medium", "low", "info"]:
-                sev_findings = [f for f in self.findings if f.severity == sev]
-                for f in sev_findings:
-                    lines.append(f.human_readable())
-                    lines.append("")
+        # Notes print too when they're all there is (2026-10-24: "7 notes below" was followed by nothing)
+        for sev in ["critical", "high", "medium", "low", "info"]:
+            sev_findings = [f for f in self.findings if f.severity == sev]
+            for f in sev_findings:
+                lines.append(f.human_readable())
+                lines.append("")
         return "\n".join(lines)
 
 
