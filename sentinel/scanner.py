@@ -75,6 +75,12 @@ class ScanResult:
     def high_count(self) -> int:
         return sum(1 for f in self.findings if f.severity == "high")
 
+    @property
+    def issues(self) -> list[Finding]:
+        """Findings that ask for action: everything but info notes (2026-10-23: a machine whose only findings were
+        notes, such as a loopback listener, read as "issues found")."""
+        return [f for f in self.findings if f.severity != "info"]
+
     def summary(self) -> str:
         total = len(self.findings)
         if total == 0:
@@ -96,10 +102,15 @@ class ScanResult:
             f"Checks: {self.checks_run} run, {self.checks_clean} clean",
             "",
         ]
+        notes = len(self.findings) - len(self.issues)
         if not self.findings:
             lines.append("No issues found. Your machine looks clean.")
+        elif not self.issues:
+            lines.append(f"No issues found. {notes} note{'s' if notes != 1 else ''} below, for your information:\n")
         else:
-            lines.append(f"{len(self.findings)} issues found:\n")
+            n = len(self.issues)
+            lines.append(f"{n} issue{'s' if n != 1 else ''} found"
+                         + (f", and {notes} note{'s' if notes != 1 else ''}" if notes else "") + ":\n")
             for sev in ["critical", "high", "medium", "low", "info"]:
                 sev_findings = [f for f in self.findings if f.severity == sev]
                 for f in sev_findings:
@@ -158,51 +169,78 @@ def check_npm_supply_chain(known_bad: dict | None = None) -> list[Finding]:
             if nm.is_dir() and "node_modules/node_modules" not in str(nm):
                 node_modules_dirs.append(nm)
 
+    scopes = set(known_bad.get("scopes", []))
+    listed = known_bad.get("packages", {})
     for nm_dir in node_modules_dirs:
-        for scope_or_pkg in nm_dir.iterdir():
-            if scope_or_pkg.name.startswith("@") and scope_or_pkg.is_dir():
-                scope = scope_or_pkg.name
-                if scope in known_bad.get("scopes", []):
-                    for pkg in scope_or_pkg.iterdir():
-                        pkg_json = pkg / "package.json"
-                        if pkg_json.exists():
-                            try:
-                                data = json.loads(pkg_json.read_text())
-                                version = data.get("version", "unknown")
-                                full_name = f"{scope}/{pkg.name}"
-                                bad_versions = known_bad.get("packages", {}).get(full_name, [])
-                                if not bad_versions or version in bad_versions:
-                                    findings.append(Finding(
-                                        check="supply_chain_npm",
-                                        severity="critical",
-                                        title=f"Compromised package: {full_name}@{version}",
-                                        description=(
-                                            f"The package {full_name} version {version} was found in "
-                                            f"{nm_dir}. This package is on the known-compromised list. "
-                                            f"It may contain malware that steals credentials and spreads "
-                                            f"to other projects."
-                                        ),
-                                        remediation=(
-                                            "1. Disconnect from the internet immediately.\n"
-                                            "2. Do NOT revoke tokens from this machine (dead man's switch).\n"
-                                            "3. From a DIFFERENT device, revoke all npm/GitHub tokens.\n"
-                                            "4. Delete the node_modules directory and reinstall from a clean lockfile.\n"
-                                            "5. Rotate ALL credentials on this machine."
-                                        ),
-                                        details={"path": str(pkg), "version": version},
-                                    ))
-                            except (json.JSONDecodeError, OSError):
-                                continue
-            elif scope_or_pkg.name in known_bad.get("packages", {}):
-                findings.append(Finding(
-                    check="supply_chain_npm",
-                    severity="high",
-                    title=f"Suspicious package: {scope_or_pkg.name}",
-                    description=f"Package {scope_or_pkg.name} found in {nm_dir}.",
-                    details={"path": str(scope_or_pkg)},
-                ))
+        try:
+            entries = list(nm_dir.iterdir())
+        except OSError:
+            continue
+        candidates = []
+        for entry in entries:
+            if entry.name.startswith("@") and entry.is_dir():
+                try:
+                    candidates += [(f"{entry.name}/{pkg.name}", pkg, entry.name) for pkg in entry.iterdir()]
+                except OSError:
+                    continue
+            elif entry.name in listed:
+                candidates.append((entry.name, entry, None))
+        for full_name, pkg, scope in candidates:
+            if full_name not in listed and scope not in scopes:
+                continue
+            version = _npm_version(pkg)
+            finding = _npm_verdict(full_name, version, listed.get(full_name), scope in scopes)
+            if finding:
+                severity, title, description, remediation = finding
+                findings.append(Finding(check="supply_chain_npm", severity=severity, title=title,
+                                        description=description.format(where=nm_dir), remediation=remediation,
+                                        details={"path": str(pkg), "version": version}))
 
     return findings
+
+
+NPM_COMPROMISED_STEPS = (
+    "1. Disconnect from the internet immediately.\n"
+    "2. Do NOT revoke tokens from this machine (dead man's switch).\n"
+    "3. From a DIFFERENT device, revoke all npm/GitHub tokens.\n"
+    "4. Delete the node_modules directory and reinstall from a clean lockfile.\n"
+    "5. Rotate ALL credentials on this machine.")
+
+
+def _npm_version(pkg: Path) -> str:
+    try:
+        return str(json.loads((pkg / "package.json").read_text()).get("version", "unknown"))
+    except (OSError, ValueError, AttributeError):
+        return "unknown"
+
+
+def _npm_verdict(name: str, version: str, bad_versions, scope_listed: bool):
+    """(severity, title, description, remediation) for one installed npm package, or None. How sure the feed is decides
+    the severity (2026-10-23): an exact bad version is critical; a package listed without versions is high; a package
+    that's only under a listed scope is medium, because scopes are broad and most of their packages are fine (every
+    @tanstack package used to be called critical)."""
+    if bad_versions is not None and version in bad_versions:
+        return ("critical", f"Compromised package: {name}@{version}",
+                f"The package {name} version {version} was found in {{where}}. This version is on the "
+                f"known-compromised list. It may contain malware that steals credentials and spreads to other projects.",
+                NPM_COMPROMISED_STEPS)
+    if bad_versions is not None and not any(bad_versions):
+        return ("high", f"Package with compromised releases: {name}@{version}",
+                f"{name} is on Sereno's list without specific versions, found in {{where}}. Check {version} against "
+                f"the package's security advisory (osv.dev lists them).",
+                "If your version is a bad one, follow the steps for a compromised package: disconnect, revoke tokens "
+                "from another device, reinstall from a clean lockfile, rotate credentials.")
+    if bad_versions and version == "unknown":
+        return ("medium", f"Listed package with an unreadable version: {name}",
+                f"{name} has known-compromised versions and is in {{where}}, but Sereno couldn't read its "
+                f"package.json to see which version this is.",
+                f"Run `npm ls {name}` in that project and compare the version with: {', '.join(bad_versions)}.")
+    if bad_versions is None and scope_listed:
+        return ("medium", f"Package from a scope that had compromised releases: {name}@{version}",
+                f"Some packages under {name.split('/')[0]} had compromised releases, and {name} {version} is in "
+                f"{{where}}. Most packages under a listed scope are fine: compare your version with the advisory.",
+                "Look up the scope's advisory (osv.dev); only act if your exact version is named there.")
+    return None
 
 
 # ── Check: Supply Chain (pip) ──
@@ -310,12 +348,12 @@ def check_persistence() -> list[Finding]:
                 details={"path": str(path)},
             ))
 
-    # Payload files — check name AND location context
-    payload_names = ["router_runtime.js", "router_init.js", "setup.mjs", "tanstack_runner.js"]
-    # sysmon.py is only suspicious outside of known-safe locations (e.g. coverage package)
+    # Payload files. Distinctive names are the worm's own and are critical anywhere outside node_modules. Generic
+    # names (setup.mjs, sysmon.py) are common in ordinary projects, so they're critical only with corroboration: a
+    # distinctive payload in the same folder, or content that names one. Otherwise they're info (2026-10-23: a plain
+    # setup.mjs or a homemade sysmon.py was called critical malware).
     sysmon_safe_parents = {"coverage", "sysmon", "psutil", "watchdog"}
-
-    for name in payload_names:
+    for name in PAYLOAD_DISTINCTIVE:
         for found in home.rglob(name):
             if "node_modules" in str(found):
                 continue
@@ -327,20 +365,34 @@ def check_persistence() -> list[Finding]:
                 remediation="Disconnect from internet, revoke tokens from another device, then delete.",
                 details={"path": str(found)},
             ))
-
-    for found in home.rglob("sysmon.py"):
-        if any(safe in str(found.parent) for safe in sysmon_safe_parents):
-            continue
-        if "site-packages" in str(found):
-            continue
-        findings.append(Finding(
-            check="persistence",
-            severity="critical",
-            title="Malware payload found: sysmon.py",
-            description=f"Found {found}. This may be a Shai-Hulud payload file.",
-            remediation="Disconnect from internet, revoke tokens from another device, then delete.",
-            details={"path": str(found)},
-        ))
+    for name in PAYLOAD_GENERIC:
+        for found in home.rglob(name):
+            # The skips main had, per name: setup.mjs outside node_modules, sysmon.py outside site-packages and
+            # known tools' folders
+            if name == "setup.mjs" and "node_modules" in str(found):
+                continue
+            if name == "sysmon.py" and ("site-packages" in str(found)
+                                        or any(safe in str(found.parent) for safe in sysmon_safe_parents)):
+                continue
+            if _payload_corroborated(found):
+                findings.append(Finding(
+                    check="persistence",
+                    severity="critical",
+                    title=f"Malware payload found: {name}",
+                    description=f"Found {found}, alongside or naming the Shai-Hulud worm's other payload files.",
+                    remediation="Disconnect from internet, revoke tokens from another device, then delete.",
+                    details={"path": str(found)},
+                ))
+            else:
+                findings.append(Finding(
+                    check="persistence",
+                    severity="info",
+                    title=f"A file named like a worm payload: {found}",
+                    description=(f"The Shai-Hulud worm used the name {name}, but it's also a common name, and nothing "
+                                 f"else here points to the worm. Look at it if you don't recognise it."),
+                    remediation="",
+                    details={"path": str(found)},
+                ))
 
     # Claude Code settings: hooks and API-endpoint overrides, user-level and in project folders (sentinel/claude_settings.py)
     from .claude_settings import check_claude_settings
@@ -449,6 +501,22 @@ def pth_verdict(name: str, content: str):
     if _PTH_RISKY.search(content):
         return "high", "has an import line that runs code (exec, decoding, a shell or the network)."
     return "high", "has an import line, which runs code."
+
+
+PAYLOAD_DISTINCTIVE = ("router_runtime.js", "router_init.js", "tanstack_runner.js")
+PAYLOAD_GENERIC = ("setup.mjs", "sysmon.py")
+
+
+def _payload_corroborated(path: Path) -> bool:
+    """A generic payload name counts as the worm's when a distinctive payload sits in the same folder, or the file
+    names one (or the worm's token monitor)."""
+    if any((path.parent / n).exists() for n in PAYLOAD_DISTINCTIVE):
+        return True
+    try:
+        text = path.read_text(errors="replace")[:200_000]
+    except OSError:
+        return False
+    return any(n in text for n in PAYLOAD_DISTINCTIVE + ("gh-token-monitor",))
 
 
 # ── Check: Processes ──
@@ -702,14 +770,18 @@ def check_mcp() -> list[Finding]:
 
 # ── Main Scanner ──
 
+CHECK_NAMES = ("npm_supply_chain", "pip_supply_chain", "persistence", "processes", "network", "credentials",
+               "git_repos", "mcp_servers")
+
 class SentinelScanner:
     """The main scanner orchestrator."""
 
     def __init__(self, checks: list[str] | None = None) -> None:
-        self._checks = checks or [
-            "npm_supply_chain", "pip_supply_chain", "persistence",
-            "processes", "network", "credentials", "git_repos", "mcp_servers",
-        ]
+        self._checks = checks or list(CHECK_NAMES)
+        unknown = [c for c in self._checks if c not in CHECK_NAMES]
+        if unknown:
+            # A misspelled name used to run nothing and report clean
+            raise ValueError("unknown check name(s): %s; the checks are: %s" % (", ".join(unknown), ", ".join(CHECK_NAMES)))
 
     def scan(self) -> ScanResult:
         """Run all enabled checks and return results."""
@@ -736,9 +808,7 @@ class SentinelScanner:
         }
 
         for check_name in self._checks:
-            fn = check_map.get(check_name)
-            if fn is None:
-                continue
+            fn = check_map[check_name]
             try:
                 result.checks_run += 1
                 findings = fn()
@@ -747,7 +817,18 @@ class SentinelScanner:
                 else:
                     result.checks_clean += 1
             except Exception as e:
+                # A check that couldn't run checked nothing, so the result must not read as clean (2026-10-23: a
+                # crash was only logged, and the scan still said "Your machine looks clean")
                 logger.warning("Check %s failed: %s", check_name, e)
+                result.findings.append(Finding(
+                    check=check_name,
+                    severity="high",
+                    title=f"Check couldn't run: {check_name}",
+                    description=f"The {check_name} check stopped with an error ({type(e).__name__}: {str(e)[:200]}), "
+                                f"so nothing it looks for was checked.",
+                    remediation="Run it again; if it keeps failing, report it with this message.",
+                    details={"error": f"{type(e).__name__}: {e}"},
+                ))
 
         result.duration_ms = (time.time() - t0) * 1000
         return result

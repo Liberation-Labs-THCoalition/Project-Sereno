@@ -70,17 +70,63 @@ class TestNpmSupplyChain:
         # Won't find anything in home dir unless there are actual bad packages
         assert isinstance(findings, list)
 
-    def test_detects_bad_scope(self, tmp_path, monkeypatch):
-        nm = tmp_path / "node_modules" / "@evil" / "badpkg"
-        nm.mkdir(parents=True)
-        (nm / "package.json").write_text('{"name": "@evil/badpkg", "version": "1.0.0"}')
+    @staticmethod
+    def _install(tmp_path, name, version=None):
+        pkg = tmp_path / "node_modules" / name
+        pkg.mkdir(parents=True)
+        if version is not None:
+            (pkg / "package.json").write_text(json.dumps({"name": name, "version": version}))
+        return pkg
 
+    def _scan(self, tmp_path, monkeypatch, known_bad):
         monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
-        known_bad = {"scopes": ["@evil"], "packages": {}}
-        findings = check_npm_supply_chain(known_bad)
-        assert len(findings) == 1
-        assert findings[0].severity == "critical"
-        assert "@evil/badpkg" in findings[0].title
+        return check_npm_supply_chain(known_bad)
+
+    def test_scope_only_is_medium_not_critical(self, tmp_path, monkeypatch):
+        # Every @tanstack package used to be called a compromise; most of a listed scope is fine (2026-10-23)
+        self._install(tmp_path, "@evil/badpkg", "1.0.0")
+        findings = self._scan(tmp_path, monkeypatch, {"scopes": ["@evil"], "packages": {}})
+        assert [f.severity for f in findings] == ["medium"]
+        assert "@evil/badpkg@1.0.0" in findings[0].title
+        assert "compare your version" in findings[0].description
+
+    def test_exact_scoped_version_is_critical_without_its_scope_listed(self, tmp_path, monkeypatch):
+        self._install(tmp_path, "@corp/lib", "2.0.1")
+        findings = self._scan(tmp_path, monkeypatch, {"scopes": [], "packages": {"@corp/lib": ["2.0.1"]}})
+        assert [f.severity for f in findings] == ["critical"]
+        assert findings[0].title == "Compromised package: @corp/lib@2.0.1"
+        assert "Disconnect" in findings[0].remediation
+
+    def test_exact_unscoped_version_is_critical(self, tmp_path, monkeypatch):
+        self._install(tmp_path, "leftpad2", "0.3.0")
+        findings = self._scan(tmp_path, monkeypatch, {"scopes": [], "packages": {"leftpad2": ["0.1.0", "0.3.0"]}})
+        assert [f.severity for f in findings] == ["critical"]
+        assert findings[0].details["version"] == "0.3.0"
+
+    def test_listed_without_versions_is_high(self, tmp_path, monkeypatch):
+        self._install(tmp_path, "cross-stitch", "1.4.0")
+        self._install(tmp_path, "@corp/tool", "3.0.0")
+        findings = self._scan(tmp_path, monkeypatch, {"scopes": [], "packages": {"cross-stitch": [], "@corp/tool": []}})
+        assert sorted((f.severity, f.details["version"]) for f in findings) == [("high", "1.4.0"), ("high", "3.0.0")]
+        assert all("osv.dev" in f.description for f in findings)
+
+    def test_listed_package_at_a_clean_version_is_quiet(self, tmp_path, monkeypatch):
+        # The exact entry decides: its scope being listed adds no medium on top
+        self._install(tmp_path, "@evil/lib", "1.0.0")
+        self._install(tmp_path, "plainpkg", "1.0.0")
+        known_bad = {"scopes": ["@evil"], "packages": {"@evil/lib": ["1.0.1"], "plainpkg": ["9.9.9"]}}
+        assert self._scan(tmp_path, monkeypatch, known_bad) == []
+
+    def test_listed_package_with_unreadable_version_is_medium(self, tmp_path, monkeypatch):
+        self._install(tmp_path, "plainpkg")
+        findings = self._scan(tmp_path, monkeypatch, {"scopes": [], "packages": {"plainpkg": ["9.9.9"]}})
+        assert [f.severity for f in findings] == ["medium"]
+        assert "9.9.9" in findings[0].remediation
+
+    def test_unlisted_packages_are_quiet(self, tmp_path, monkeypatch):
+        self._install(tmp_path, "@other/lib", "1.0.0")
+        self._install(tmp_path, "express", "4.0.0")
+        assert self._scan(tmp_path, monkeypatch, {"scopes": ["@evil"], "packages": {"leftpad2": []}}) == []
 
 
 class TestPipSupplyChain:

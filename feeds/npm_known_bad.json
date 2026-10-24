@@ -3,7 +3,7 @@
     "name": "Sereno — Known-Bad npm Packages",
     "updated": "2026-10-23",
     "source": "CVE-2026-45321 (Mini Shai-Hulud), community reports",
-    "description": "Compromised npm package scopes and specific versions. Scopes list means ANY package under that scope may be affected. Packages dict maps name to list of known-bad versions (empty list = all versions suspect)."
+    "description": "Compromised npm package scopes and specific versions. A scope entry means some packages under it had compromised releases: Sereno reports those packages as medium and asks you to compare versions. Packages maps a full name (scoped or not) to its known-bad versions: an exact match is critical; an empty list means every version is suspect and is reported as high."
   },
   "scopes": [
     "@tanstack",

@@ -108,4 +108,4 @@ class AlertBus:
 
         # Summary for everything
         for t in self._transports:
-            t.send(result.summary(), "high" if result.critical_count else "medium")
+            t.send(result.summary(), "high" if result.critical_count else "medium" if result.issues else "info")

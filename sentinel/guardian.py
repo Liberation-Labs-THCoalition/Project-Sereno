@@ -125,7 +125,7 @@ def main():
 
     if args.status:
         print(bdi.summary())
-        return
+        return 0
 
     transports = [StdoutAlert()]
     if args.log:
@@ -136,12 +136,34 @@ def main():
     bus = AlertBus(transports)
     results = run_guardian(bdi=bdi, force=args.force, alert_bus=bus)
 
-    total_findings = sum(len(r.assessments) for r in results)
-    if total_findings:
-        print(f"\n{total_findings} findings from {len(results)} skills.")
-    else:
-        print(f"\nAll clear. {len(results)} skills ran clean.")
+    print("\n" + summary_line(results))
+    return 1 if any(not r.success for r in results) else 0
+
+
+def _n(count: int, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def summary_line(results: list[SkillResult]) -> str:
+    """The run's last line. "All clear" only when every skill ran and none found anything: it used to print after a
+    skill had failed, and after a run where nothing was due (2026-10-23)."""
+    if not results:
+        return "Nothing was due, so no skills ran. Run with --force all to run every check now."
+    failed = [r.skill for r in results if not r.success]
+    findings = sum(1 for r in results for a in r.assessments if a.severity != "info")
+    notes = sum(1 for r in results for a in r.assessments if a.severity == "info")
+    parts = []
+    if failed:
+        parts.append(f"{len(failed)} of {_n(len(results), 'skill')} failed to run ({', '.join(failed)}). Their checks "
+                     f"didn't happen, so this run can't say the machine is clean.")
+    if findings:
+        parts.append(f"{_n(findings, 'finding')} from {_n(len(results), 'skill')}"
+                     + (f", and {_n(notes, 'note')}." if notes else "."))
+    if parts:
+        return " ".join(parts)
+    return f"All clear: {_n(len(results), 'skill')} ran and found nothing that needs action" + (
+        f" ({_n(notes, 'note')} in the log)." if notes else ".")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

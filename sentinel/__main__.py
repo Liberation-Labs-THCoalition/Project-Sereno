@@ -18,19 +18,26 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from .scanner import SentinelScanner
+from .scanner import CHECK_NAMES, SentinelScanner
 from .alerts import AlertBus, StdoutAlert, FileAlert, DiscordWebhookAlert
 from .baseline import FileBaseline
+from .paths import sentinel_home
 from .profiler import profile_system, save_profile
 
 
 def cmd_scan(args) -> int:
-    checks = args.checks.split(",") if args.checks else None
-    scanner = SentinelScanner(checks=checks)
+    checks = [c.strip() for c in args.checks.split(",") if c.strip()] if args.checks else None
+    try:
+        scanner = SentinelScanner(checks=checks)
+    except ValueError as e:
+        # A misspelled check name used to run nothing and report a clean machine (2026-10-23)
+        print(f"sentinel: {e}", file=sys.stderr)
+        return 2
     result = scanner.scan()
 
+    # --cron stays quiet unless something asks for action; info notes alone don't (2026-10-23)
     transports = []
-    if not args.cron or result.findings:
+    if not args.cron or result.issues:
         transports.append(StdoutAlert())
     if args.log:
         transports.append(FileAlert(args.log))
@@ -44,13 +51,13 @@ def cmd_scan(args) -> int:
         output = json.dumps(asdict(result), indent=2)
         if args.output:
             Path(args.output).write_text(output)
-        if not args.cron or result.findings:
+        if not args.cron or result.issues:
             print(output)
     else:
-        if not args.cron or result.findings:
+        if not args.cron or result.issues:
             print(result.human_report())
 
-    if result.findings:
+    if result.issues:
         bus.alert_findings(result)
 
     return 1 if result.critical_count > 0 else 0
@@ -68,7 +75,7 @@ def cmd_profile(args) -> int:
     profile = profile_system()
     save_profile(profile)
     print(profile.summary())
-    print(f"\nProfile saved to ~/.sentinel/profile.json")
+    print(f"\nProfile saved to {sentinel_home() / 'profile.json'}")
     return 0
 
 
@@ -81,7 +88,7 @@ def cmd_baseline(args) -> int:
         count = baseline.create()
         baseline.save()
         print(f"Baseline created: {count} files tracked.")
-        print("Saved to ~/.sentinel/baseline.json")
+        print(f"Saved to {sentinel_home() / 'baseline.json'}")
         return 0
 
     elif action == "check":
@@ -115,7 +122,7 @@ def cmd_baseline(args) -> int:
 
 def cmd_all(args) -> int:
     print("=" * 50)
-    print("COMMUNITY DEFENDER — FULL ASSESSMENT")
+    print("SERENO — FULL ASSESSMENT")
     print("=" * 50)
 
     print("\n[1/4] System Profile\n")
@@ -156,9 +163,9 @@ def cmd_all(args) -> int:
         print(f"Baseline created: {count} files tracked.")
 
     print(f"\n{'=' * 50}")
-    total_issues = len(result.findings)
+    total_issues = len(result.issues)
     if total_issues == 0:
-        print("Your machine looks good. Stay safe out there.")
+        print("No issues found. Stay safe out there.")
     else:
         print(f"{total_issues} issues found. Check the details above.")
     print("=" * 50)
@@ -179,7 +186,7 @@ def main() -> None:
     scan_p.add_argument("-o", "--output", default="")
     scan_p.add_argument("--discord", default="")
     scan_p.add_argument("--log", default="")
-    scan_p.add_argument("--checks", default="")
+    scan_p.add_argument("--checks", default="", help="Comma-separated, from: " + ", ".join(CHECK_NAMES))
     scan_p.add_argument("--cron", action="store_true")
 
     # harden
