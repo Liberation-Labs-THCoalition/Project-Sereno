@@ -4,6 +4,18 @@ What changed in Sereno, in plain words. Newest first. To get the changes, run `g
 
 ## 2026-10-23
 
+- **Honest results.** What Sereno says now matches what it checked. (b80e1f2)
+  - npm matches are rated by how exact the list is: a known-bad version is critical, a listed package without versions
+    is high, and a package that's only under a listed scope is medium, where every `@tanstack` package used to be
+    called critical.
+  - A check that breaks is reported as a high finding ("Check couldn't run"), where a scan used to end with "No issues
+    found".
+  - A misspelled `--checks` name stops the scan (exit code 2) instead of running nothing and reporting clean.
+  - The guardian's last line says "All clear" only when every skill ran and found nothing; a failed skill is named,
+    and the guardian exits with 1.
+  - Info notes aren't counted as issues, and `--cron` stays quiet when notes are all there is.
+  - `setup.mjs` and `sysmon.py` alone are a note, not critical malware; next to the worm's other files they're still
+    critical.
 - **New check: MCP servers.** Sereno now reads the configs of AI coding tools (Claude Code, Claude Desktop, Cursor,
   VS Code, Windsurf, Gemini CLI, and Codex on Python 3.11+) and reports MCP servers started with no fixed version
   (`npx -y some-server`, `uvx some-server`), and API keys written in plain text in those configs, by key name, never

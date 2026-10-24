@@ -51,9 +51,9 @@ The commands say `sentinel`, not `sereno`. That's the name of Sereno's code fold
 
 | Check | What it looks for |
 |-------|-------------------|
-| **Supply chain: npm** | Packages in the `node_modules` folders under your home folder that are on Sereno's npm list. The list names whole scopes, such as `@tanstack`, and any package under a listed scope is reported as critical, whatever its version. Compare your version with the advisory (see Threat Feeds); if it's a bad one, follow the steps in the finding. |
+| **Supply chain: npm** | Packages in the `node_modules` folders under your home folder that are on Sereno's npm list. How serious a match is depends on how exact the list is. A known-bad version is critical. A listed package whose bad versions aren't given is high. A package that's only under a listed scope, such as `@tanstack`, is medium: most packages in those scopes are fine, so compare your version with the advisory (see Threat Feeds), and if it's a bad one, follow the steps in the finding. |
 | **Supply chain: pip** | Python packages that `pip3 list` shows, checked against Sereno's pip list. That's one Python install: packages in your other virtual environments aren't on it. An exact known-bad version is critical. A listed package whose bad versions aren't given is reported as high, so you can check yours. |
-| **Persistence** | Ways malware makes itself start again: the Shai-Hulud worm's files anywhere in your home folder (its token monitor, also as a systemd service or macOS LaunchAgent, and its payload files), VS Code tasks that call them, Claude Code hooks, and Python startup files that run code. More below. |
+| **Persistence** | Ways malware makes itself start again: the Shai-Hulud worm's files anywhere in your home folder (its token monitor, also as a systemd service or macOS LaunchAgent, and its payload files; `setup.mjs` and `sysmon.py` are common names, so alone they're a note, and critical only next to the worm's other files or naming them), VS Code tasks that call them, Claude Code hooks, and Python startup files that run code. More below. |
 | **Processes** | Running programs with names known from malware: the Shai-Hulud token monitor and payloads, cryptominers such as xmrig, and reverse shells. |
 | **Network** | Programs waiting for connections (listening ports). Every TCP port except 22, 80 and 443: medium if other machines can reach it, info if only this machine can. UDP services on ports up to 1024 that other machines can reach, except common ones (DHCP, NTP, NetBIOS). |
 | **Credentials** | Tokens in `~/.npmrc` (high), and lines that look like API keys, tokens or passwords in files named `.env` under your home folder (medium). |
@@ -86,7 +86,7 @@ Sereno reads. It doesn't change your files. It writes only its own files in `$SE
 
 | Part | What it reads |
 |------|---------------|
-| Supply chain | Package folder names in the `node_modules` folders under your home, and `package.json` for packages under listed scopes. Package names and versions from `pip3 list`. |
+| Supply chain | Package folder names in the `node_modules` folders under your home, and the `package.json` of each package that's on the list or under a listed scope. Package names and versions from `pip3 list`. |
 | Persistence | File names across your home folder. Claude Code settings files, and the project list in `~/.claude.json`. VS Code `tasks.json` files. `.pth`, `sitecustomize.py` and `usercustomize.py` files under your home. |
 | Processes | The process list (`ps aux`), which includes each program's full command line. |
 | Network | The listening ports (`ss` on Linux, `lsof` on macOS) and your `expected.json`. |
@@ -110,7 +110,7 @@ What leaves your machine:
 - **Not real-time protection.** It looks when you run it, or when the guardian's schedule comes round. Something that comes and goes between looks can be missed.
 - **Not a replacement for updates.** Keep your system and your apps up to date.
 - **Not a replacement for your judgment.** A finding is something to look at, not proof of an attack: ordinary software sometimes looks like this. If you're not sure, ask someone you trust before you delete anything.
-- **"Nothing found" means nothing found by these checks,** in the places they look. It doesn't mean the machine is clean. Two gaps to know about: if a check itself breaks, a scan prints only a warning line and can still end with "No issues found", and the guardian's last line can say "All clear" after a check failed. Read the whole output.
+- **"Nothing found" means nothing found by these checks,** in the places they look. It doesn't mean the machine is clean. If a check itself breaks, the scan says so as a high finding ("Check couldn't run"), and the guardian names the skill that failed instead of saying "All clear".
 - **Linux and macOS.** On Windows, run it inside WSL. On Windows itself, the process and network checks can't look, and say nothing.
 
 ## Alerts
@@ -140,7 +140,9 @@ python3 -m sentinel scan --json -o results.json
 python3 -m sentinel scan --checks network,mcp_servers
 ```
 
-Check names for `--checks`: `npm_supply_chain`, `pip_supply_chain`, `persistence`, `processes`, `network`, `credentials`, `git_repos`, `mcp_servers`. A misspelled name is skipped without a warning. A scan exits with 1 when it finds something critical, and with 0 otherwise.
+Check names for `--checks`: `npm_supply_chain`, `pip_supply_chain`, `persistence`, `processes`, `network`, `credentials`, `git_repos`, `mcp_servers`. A misspelled name stops the scan before it starts, with the list of names. A scan exits with 1 when it finds something critical, 2 for a check name it doesn't know, and 0 otherwise.
+
+Findings marked info are notes, not issues: a port only this machine can reach, for example. The report lists them after "No issues found", and `--cron` stays quiet when notes are all there is.
 
 ## Proactive Guardian
 
@@ -182,8 +184,8 @@ What the guardian does on each run:
 - **Hardening**, once a day: it alerts only when the set of recommendations has changed since the last run, so the same
   advice doesn't page you every day.
 - A check that breaks sends an alert saying it failed, and the run record in `$SENTINEL_HOME/guardian_runs/` marks it
-  failed. Two known gaps: the summary line at the end can still say "All clear" after a failure, and a problem inside a
-  single scan check shows only as a warning line in the output. Read the whole output, not only the last line.
+  failed. The run's last line says "All clear" only when every skill ran and found nothing that needs action. When a
+  skill failed, it names it and the guardian exits with 1; when nothing was due, it says that no skills ran.
 
 What it doesn't do: it doesn't learn what is normal for your machine beyond the baseline you create and the last set of
 hardening advice, it uses no AI model, and it sends nothing anywhere unless you turn on Discord alerts.
