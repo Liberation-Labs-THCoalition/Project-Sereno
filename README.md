@@ -47,7 +47,7 @@ The commands say `sentinel`, not `sereno`. That's the name of Sereno's code fold
 
 ## What It Checks
 
-`python3 -m sentinel scan` runs these eight checks:
+`python3 -m sentinel scan` runs these nine checks:
 
 | Check | What it looks for |
 |-------|-------------------|
@@ -59,6 +59,7 @@ The commands say `sentinel`, not `sereno`. That's the name of Sereno's code fold
 | **Credentials** | Tokens in `~/.npmrc` (high), and lines that look like API keys, tokens or passwords in files named `.env` under your home folder (medium). |
 | **Git repos** | Dune-themed branch names, which the Shai-Hulud worm used to carry stolen data out, in the git repositories under your home folder. |
 | **MCP servers** | AI coding tools (Claude Code, Claude Desktop, Cursor, VS Code, Windsurf, Gemini CLI, and Codex on Python 3.11+) starting MCP servers with no fixed version (`npx -y some-server`, `uvx some-server`): medium, or high if the package is on Sereno's lists. API keys written in plain text in their configs, named, never shown: medium, or high if git tracks the file. Project `.mcp.json`, `.cursor/mcp.json` and `.vscode/mcp.json` files count too. |
+| **AI agent safety** | AI coding agents set to skip their own safety prompts: Claude Code's bypass mode, its warning before bypass mode turned off, every project MCP server approved, or every shell command allowed (`Bash`, `Bash(*)`); Codex set to never ask with no sandbox; VS Code's global auto-approve; Gemini CLI letting every shell command through; and shell aliases that start `claude`, `codex` or `gemini` with their skip flags. In your own settings these are advice (medium): what it means, and how to turn the prompt back on. In a project folder's Claude Code settings they're high, because a repo someone else wrote can switch your prompts off. Agent logins left exposed: a login file other accounts can read (`~/.claude/.credentials.json`, Codex's `auth.json`, Gemini CLI's `oauth_creds.json`), or an agent API key or token (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY` and two more) written into a shell startup file or your Claude Code settings: high, named, never shown. |
 
 Two more checks run outside `scan`. Both are part of `all` and of the guardian:
 
@@ -76,7 +77,9 @@ A plain hook in your own settings isn't reported: it's yours.
 
 **Python startup files.** Python runs some files every time it starts: a line in a `.pth` file that begins with `import`, and any `sitecustomize.py` or `usercustomize.py`. The malware in litellm 1.107.0 used both. Sereno looks in the `site-packages` and `dist-packages` folders under your home and reports each one as high, except well-known normal ones (virtualenv, setuptools, editable installs, coverage, pytest-cov, namespace packages, coloredlogs). It recognises those by file name and content together, so a file can't pass by borrowing a name.
 
-**Files Sereno can't read.** A Claude Code settings file or MCP config that Sereno can't read is reported as "not checked" (info), never as clean.
+**AI agent safety prompts and logins.** Claude Code, Codex and Gemini CLI ask before they run a command or change a file, and each can be told not to. That's your call, and in your own settings Sereno treats it as advice: it says what the setting does, how to turn the prompt back on, and how to undo that. But an agent that never asks also acts on a prompt hidden in a file it reads, and the s1ngularity malware (2025) drove installed agents with exactly these skip flags. A project folder's Claude Code settings that switch prompts off are high. Claude Code 2.1.257 and later ignore bypass mode in a project's files, and a project's allow rules wait until you trust the folder; but earlier versions honor bypass mode from a project, and one click on "trust" lets the allow rules through. A project's `.claude/settings.local.json` that git doesn't track is treated as yours, as Claude Code treats it. Keys and tokens are named by variable, file and line, never shown, and shell lines aren't quoted. A short value such as `ollama`, which local model servers ask for, is a note, not an issue. An agent credential in Sereno's own environment is a note too: that's how people run agents.
+
+**Files Sereno can't read.** A Claude Code settings file, MCP config, or any file the agent safety check reads that Sereno can't read is reported as "not checked" (info), never as clean.
 
 **Expected ports.** Sereno reports every listening TCP port except 22, 80 and 443, and UDP services on ports up to 1024; a port only this machine can reach (127.0.0.1, ::1) is info. To mark the ones you run on purpose, list them in `$SENTINEL_HOME/expected.json` (default `~/.sentinel/expected.json`) as `{"ports": [11434, 5432]}`. They are still reported, as info ("expected by operator"), so you can always see what is listening, but they won't alert.
 
@@ -93,6 +96,7 @@ Sereno reads. It doesn't change your files. It writes only its own files in `$SE
 | Credentials | `~/.npmrc` and `.env` files under your home. |
 | Git repos | Branch names in each repository under your home (`git branch -a`). |
 | MCP servers | The MCP config files of the tools listed above, and `~/.claude.json`, which holds Claude Code's servers and project list. For a config holding a secret, it asks git whether the file is tracked. |
+| AI agent safety | Claude Code settings files (yours in `~/.claude` and `$CLAUDE_CONFIG_DIR`, managed ones, and the project ones the persistence check finds, using the project list in `~/.claude.json`), Codex's `config.toml` (in `~/.codex` and `$CODEX_HOME`), Gemini CLI's `~/.gemini/settings.json`, VS Code's user `settings.json`, and your shell startup files: `.bashrc`, `.bash_profile`, `.bash_login`, `.bash_aliases`, `.profile`, `.zshrc`, `.zprofile`, `.zshenv`, and fish's `config.fish`, `conf.d` and `functions`. For a project's `settings.local.json` that switches prompts off, it asks git whether the file is tracked. Agent login files are never opened: only their permissions are read. From its own environment, only whether agent credential variables are set, never their values. |
 | File integrity | Every file in the watch list, read to fingerprint it: `~/.ssh` (private keys included), `.bashrc`, `.zshrc`, `.profile`, `.gitconfig`, `.npmrc`, `~/.vscode`, your systemd user services, and in `~/.claude` only settings, hooks, commands, agents, skills, `CLAUDE.md`, keybindings and the plugin lists (not transcripts or caches). On Linux also `/etc/crontab`, `/etc/hosts`, `/etc/passwd` and `/etc/sudoers`; on macOS, `~/Library/LaunchAgents`. The baseline stores each file's path, SHA-256 fingerprint, size, time, permissions and owner, never its contents. A file you can't read, like `/etc/sudoers` for most users, is tracked by its permissions and owner only. |
 | Hardening | Permissions of SSH keys and credential files, `/etc/ssh/sshd_config`, firewall status, automatic-update settings (`/etc/apt/apt.conf.d/20auto-upgrades`), listening ports, and your global git email. |
 | Profile (`profile`, `all`) | Machine name, your user name, system, CPU, memory and disk use; versions of Python, Node, npm and git; counts of packages, SSH keys and `.env` files; Ollama's model list; the names of your Claude Code hook events. |
@@ -140,7 +144,7 @@ python3 -m sentinel scan --json -o results.json
 python3 -m sentinel scan --checks network,mcp_servers
 ```
 
-Check names for `--checks`: `npm_supply_chain`, `pip_supply_chain`, `persistence`, `processes`, `network`, `credentials`, `git_repos`, `mcp_servers`. A misspelled name stops the scan before it starts, with the list of names. A scan exits with 1 when it finds something critical, 2 for a check name it doesn't know, and 0 otherwise.
+Check names for `--checks`: `npm_supply_chain`, `pip_supply_chain`, `persistence`, `processes`, `network`, `credentials`, `git_repos`, `mcp_servers`, `agent_safety`. A misspelled name stops the scan before it starts, with the list of names. A scan exits with 1 when it finds something critical, 2 for a check name it doesn't know, and 0 otherwise.
 
 Findings marked info are notes, not issues: a port only this machine can reach, for example. The report lists them after "No issues found", and `--cron` stays quiet when notes are all there is.
 

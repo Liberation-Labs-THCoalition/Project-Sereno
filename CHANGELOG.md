@@ -2,6 +2,17 @@
 
 What changed in Sereno, in plain words. Newest first. To get the changes, run `git pull` in your Project-Sereno folder.
 
+## 2026-10-24
+
+- **New check: AI agent safety (`agent_safety`).** Sereno now reports AI coding agents set to skip their own
+  safety prompts: Claude Code's bypass mode, its warning before bypass mode turned off, every project MCP server
+  approved, or every shell command allowed; Codex set to never ask with no sandbox; VS Code's global auto-approve;
+  Gemini CLI letting every shell command through; and shell aliases that start `claude`, `codex` or `gemini` with
+  their skip flags. In your own settings that's advice (medium), with how to turn the prompt back on; in a project
+  folder's Claude Code settings it's high. It also reports agent logins left exposed: a login file other accounts
+  can read (`chmod 600` fixes it), and an agent API key or token written into a shell startup file or your Claude
+  Code settings, by name and line, never the value.
+
 ## 2026-10-23
 
 - **Honest results.** What Sereno says now matches what it checked. (b80e1f2)

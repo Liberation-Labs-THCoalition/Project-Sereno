@@ -43,6 +43,17 @@ def user_files(home: Path) -> list:
     return [(p, s) for p, s in files if p.is_file()]
 
 
+def known_projects(home: Path) -> list:
+    """The project folders Claude Code lists in ~/.claude.json that still exist; [] when it can't be read."""
+    claude = home / ".claude.json"
+    if not claude.is_file():
+        return []
+    try:
+        return [p for p in (json.loads(claude.read_text()).get("projects") or {}) if Path(p).is_dir()]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
 def project_files(home: Path, extra_roots=()) -> list:
     """(path, "project") for .claude/settings*.json in Claude Code's known projects and up to WALK_DEPTH folders under
     home. Home itself is the user level, not a project."""
@@ -86,15 +97,8 @@ def judge_hook(command: str, scope: str):
 def check_claude_settings(finding, home: Path = None) -> list:
     """Findings for Claude Code settings files; `finding(severity, title, description, remediation, details)`."""
     home = home or Path.home()
-    extra = []
-    claude = home / ".claude.json"
-    if claude.is_file():
-        try:
-            extra = [p for p in (json.loads(claude.read_text()).get("projects") or {}) if Path(p).is_dir()]
-        except (OSError, ValueError, AttributeError):
-            extra = []
     out, seen = [], set()
-    for path, scope in user_files(home) + project_files(home, extra):
+    for path, scope in user_files(home) + project_files(home, known_projects(home)):
         real = os.path.realpath(path)
         if real in seen:
             continue
