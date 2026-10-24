@@ -582,7 +582,7 @@ def _loopback(host: str) -> bool:
 def check_network() -> list[Finding]:
     """Listening ports, TCP and UDP, each tied to its program and binary where visible and named when it's a known
     service (sentinel/listeners.py, 2026-10-24). TCP: every listener except 22, 80 and 443, low ports included. Open to
-    other machines: medium, or high for remote control (a remote desktop, or SSH off port 22) whatever the port; bound
+    other machines: medium, or high for remote control (a remote desktop, or SSH off port 22) on any port; bound
     to this machine only (127.x, ::1): info. UDP: services on ports at or below 1024 open to other machines, beyond the
     common client ones, and remote control's own UDP ports. Tailscale's listeners on its tailnet addresses: info."""
     from .listeners import check_listeners

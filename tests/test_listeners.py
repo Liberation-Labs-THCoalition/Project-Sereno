@@ -63,8 +63,19 @@ def ss(*lines):
     return "\n".join((SS_HDR,) + lines)
 
 
+class Found(dict):
+    """Findings by (protocol, port); asking for one that isn't there fails the test as an assertion."""
+    def __missing__(self, key):
+        raise AssertionError("no finding for %s; found %s" % (key, sorted(self)))
+
+
 def by_port(findings):
-    return {(f.details["proto"], f.details["port"]): f for f in findings if "port" in f.details}
+    return Found(((f.details["proto"], f.details["port"]), f) for f in findings if "port" in f.details)
+
+
+def one(findings):
+    assert len(findings) == 1, [(f.severity, f.title) for f in findings]
+    return findings[0]
 
 
 def plant_proc(tmp_path, pid, comm=None, exe=None, fds=None, cmdline=None):
@@ -90,7 +101,7 @@ def test_rdp_by_program_on_a_nonstandard_port_is_high(monkeypatch, tmp_path):
     env(monkeypatch, tmp_path, ss_tcp=ss(
         'LISTEN 0 50 *:3390 *:* users:(("gnome-remote-de",pid=4242,fd=12)) uid:1000 ino:555 sk:1 '
         'cgroup:/user.slice/user-1000.slice/user@1000.service/app.slice/gnome-remote-desktop.service <->'))
-    f, = check_network()
+    f = one(check_network())
     assert f.severity == "high"
     assert f.title == "Remote desktop (gnome-remote-desktop) on port 3390"
     assert f.details["identified_by"] == "program"
@@ -109,7 +120,7 @@ def test_rdp_by_program_on_a_nonstandard_port_is_high(monkeypatch, tmp_path):
 
 def test_vnc_by_port_with_the_owner_hidden_is_high(monkeypatch, tmp_path):
     env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 5 0.0.0.0:5901 0.0.0.0:* ino:777 sk:2 <->'))
-    f, = check_network()
+    f = one(check_network())
     assert f.severity == "high"
     assert f.title == "Likely remote desktop (VNC) on port 5901"
     assert "owner not visible without sudo" in f.description
@@ -139,7 +150,7 @@ def test_tailscale_peer_api_from_its_status_json_is_info(monkeypatch, tmp_path):
 def test_an_unknown_root_owned_port_is_medium_owner_not_visible(monkeypatch, tmp_path):
     env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 128 0.0.0.0:7777 0.0.0.0:* ino:4242 sk:3 '
                                          'cgroup:/system.slice/mystery.service <->'))
-    f, = check_network()
+    f = one(check_network())
     assert f.severity == "medium"
     assert f.title == "Unexpected listening port: 7777"
     assert ("Sereno can't see which program this is: owner not visible without sudo. The system shows it belongs to "
@@ -233,7 +244,7 @@ def test_macos_not_checked_when_lsof_and_netstat_both_fail(monkeypatch, tmp_path
 def test_macos_lsof_finding_nothing_still_lists_netstat_sockets(monkeypatch, tmp_path):
     env(monkeypatch, tmp_path, mac=True, lsof_tcp=("", 1), lsof_udp=("", 1),
         netstat_tcp="\n".join([NETSTAT_HDR, "tcp46 0 0 *.8080 *.* LISTEN"]), netstat_udp="")
-    f, = check_network()
+    f = one(check_network())
     assert (f.severity, f.title) == ("medium", "Unexpected listening port: 8080")
     assert "owner not visible without sudo" in f.description
 
@@ -324,7 +335,7 @@ def test_no_proc_folder_at_all(monkeypatch, tmp_path):
 def test_a_deleted_binary_still_names_its_program(monkeypatch, tmp_path):
     plant_proc(tmp_path, 60, exe="/usr/sbin/xrdp (deleted)")
     env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 2 *:3389 *:* users:(("x",pid=60,fd=11)) uid:115 ino:12 sk:7 <->'))
-    f, = check_network()
+    f = one(check_network())
     assert (f.severity, f.title, f.details["identified_by"]) == ("high", "Remote desktop (xrdp) on port 3389",
                                                                   "program")
     assert f.details["exe"] == "/usr/sbin/xrdp (deleted)"
@@ -372,8 +383,13 @@ def test_service_naming_and_port_hints(monkeypatch, tmp_path):
         'LISTEN 0 1 127.0.0.1:4222 0.0.0.0:* users:(("ssh",pid=71,fd=4)) uid:1000 ino:4 sk:4 <->',
         'LISTEN 0 1 0.0.0.0:3389 0.0.0.0:* users:(("python3",pid=72,fd=3)) uid:1000 ino:5 sk:5 <->',
         'LISTEN 0 1 0.0.0.0:9999 0.0.0.0:* users:(("python3",pid=73,fd=3)) uid:1000 ino:6 sk:6 <->',
-        'LISTEN 0 1 127.0.0.1:631 0.0.0.0:* ino:7 sk:7 cgroup:/system.slice/cups.service <->'))
+        'LISTEN 0 1 0.0.0.0:6379 0.0.0.0:* users:(("python3",pid=74,fd=3)) uid:1000 ino:9 sk:9 <->',
+        'LISTEN 0 1 127.0.0.1:631 0.0.0.0:* ino:7 sk:7 cgroup:/system.slice/cups.service <->',
+        'LISTEN 0 1 127.0.0.53%lo:53 0.0.0.0:* uid:991 ino:8 sk:8 cgroup:/system.slice/systemd-resolved.service <->'))
     found = by_port(check_network())
+    dns = found[("TCP", "53")]
+    assert dns.title == "DNS resolver (systemd-resolved) on port 53 (this machine only)"
+    assert "usual port" not in dns.description
     pg = found[("TCP", "5432")]
     assert (pg.severity, pg.title) == ("medium", "PostgreSQL on port 5432")
     assert "Named by its program." in pg.description and "usual port" not in pg.description
@@ -391,15 +407,20 @@ def test_service_naming_and_port_hints(monkeypatch, tmp_path):
     assert (py.severity, py.title) == ("medium", "Unexpected listening port: 3389")
     assert "Port 3389 is the usual port for remote desktop (RDP)." in py.description
     assert found[("TCP", "9999")].description.count("Port 9999") == 0
+    assert found[("TCP", "9999")].remediation.startswith("Check what's using port 9999.")   # the program is visible
+    redis = found[("TCP", "6379")]
+    assert (redis.severity, redis.title) == ("medium", "Unexpected listening port: 6379")
+    assert "Port 6379 is the usual port for Redis." in redis.description
     cups = found[("TCP", "631")]
     assert cups.title == "Printing (CUPS) on port 631 (this machine only)"
     assert "To see which program" not in cups.remediation
+    assert "usual port" not in cups.description               # the name already says it
 
 
 def test_a_launcher_holding_the_socket_is_named_by_port(monkeypatch, tmp_path):
     env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(
         'LISTEN 0 1 *:3389 *:* users:(("systemd",pid=1,fd=50)) ino:8 sk:8 cgroup:/system.slice/rdp.socket <->'))
-    f, = check_network()
+    f = one(check_network())
     assert (f.severity, f.title) == ("high", "Likely remote desktop (RDP) on port 3389")
     assert "Program: systemd (pid 1), user root." in f.description
     assert "`sudo systemctl disable --now xrdp`" in f.remediation and "grdctl --system rdp disable" in f.remediation
@@ -413,14 +434,14 @@ def test_tailscale_needs_both_the_address_and_the_listed_port(monkeypatch, tmp_p
                                        "PeerAPIURL": ["http://100.80.54.90:56893"]}})
     for planted, where in ((other, "machines on your Tailscale network"), (unlisted_ip, "other machines")):
         env(monkeypatch, tmp_path, tailscale=planted, ss_tcp=ss('LISTEN 0 4096 100.80.54.90:56893 0.0.0.0:*'))
-        f, = check_network()
+        f = one(check_network())
         assert (f.severity, f.title) == ("medium", "Unexpected listening port: 56893"), planted
         assert "reachable from %s" % where in f.description
 
 
 def test_without_tailscale_the_rule_is_skipped_quietly(monkeypatch, tmp_path):
     env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 4096 100.80.54.90:56893 0.0.0.0:*'))
-    f, = check_network()
+    f = one(check_network())
     assert (f.severity, f.title) == ("medium", "Unexpected listening port: 56893")
     assert "reachable from other machines" in f.description
 
@@ -460,7 +481,7 @@ def test_tailscaled_by_unit_or_program_needs_root(monkeypatch, tmp_path):
 def test_tailscaled_by_program_as_root(monkeypatch, tmp_path):
     env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(
         'LISTEN 0 1 100.80.54.90:41000 0.0.0.0:* users:(("tailscaled",pid=80,fd=3)) ino:4 sk:4 <->'))
-    f, = check_network()
+    f = one(check_network())
     assert (f.severity, f.title) == ("info", "Tailscale (tailscaled) on port 41000")
     assert "Identified by its program, tailscaled, running as root." in f.description
 
@@ -538,7 +559,7 @@ def test_udp_rules(monkeypatch, tmp_path, line, reported):
 ])
 def test_remote_ports_by_range(monkeypatch, tmp_path, port, title):
     env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 1 0.0.0.0:%s 0.0.0.0:* ino:1 sk:1 <->' % port))
-    f, = check_network()
+    f = one(check_network())
     assert f.title == title
     assert f.severity == ("high" if title.startswith("Likely") else "medium")
 
@@ -554,22 +575,23 @@ def test_grouping_one_finding_per_port(monkeypatch, tmp_path):
 
 
 def test_who_owns_what(monkeypatch, tmp_path):
-    lines = ('LISTEN 0 1 127.0.0.1:7000 0.0.0.0:* users:(("node",pid=5,fd=3)) uid:1000 ino:1 sk:1 <->',
-             'LISTEN 0 1 0.0.0.0:7000 0.0.0.0:* uid:33 ino:2 sk:2 <->')
+    lines = ('LISTEN 0 1 0.0.0.0:7000 0.0.0.0:* uid:33 ino:2 sk:2 <->',
+             'LISTEN 0 1 127.0.0.1:7000 0.0.0.0:* users:(("node",pid=5,fd=3)) uid:1000 ino:1 sk:1 <->')
     env(monkeypatch, tmp_path, ss_tcp=ss(*lines))
-    f, = check_network()
+    f = one(check_network())
     assert "Program: node (pid 5), user " in f.description
     assert "Another socket on this port: owner not visible without sudo." in f.description
     assert f.details["owner_visible"] is False and f.details["programs"] == ["node"]
     env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(*lines))
-    f, = check_network()
+    f = one(check_network())
     assert "No program holds one socket on this port: it's the kernel's" in f.description
     env(monkeypatch, tmp_path, euid=0, ss_tcp=ss('LISTEN 0 1 0.0.0.0:7002 0.0.0.0:* ino:2 sk:2 <->'))
-    f, = check_network()
+    f = one(check_network())
     assert "No program holds it: it's the kernel's (WireGuard and NFS work this way). The system shows it belongs " \
            "to user root." in f.description
+    assert f.remediation.startswith("Check what's using port 7002.")   # as root, sudo shows nothing more
     env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 1 0.0.0.0:7003 0.0.0.0:*'))
-    f, = check_network()
+    f = one(check_network())
     assert f.description.split(" Line:")[0].endswith("Sereno can't see which program this is: owner not visible "
                                                      "without sudo.")
 
@@ -616,3 +638,109 @@ def test_a_visible_program_outranks_its_unit(monkeypatch, tmp_path):
     found = by_port(check_network())
     assert [(f.severity, f.title) for f in found.values()] == [("medium", "Unexpected listening port: 7000"),
                                                                ("medium", "Unexpected listening port: 7001")]
+
+
+# ── Malformed input, spoofing and the edges mutation testing found ──
+
+def no_crash(fn, *args):
+    """A guard against bad input has one job, not raising; this says so as an assertion."""
+    try:
+        return fn(*args)
+    except Exception as e:  # noqa: BLE001
+        pytest.fail("%s raised on malformed input: %r" % (fn.__name__, e))
+
+
+def test_malformed_lines_are_skipped_not_fatal(monkeypatch, tmp_path):
+    plant_proc_net(tmp_path, tcp=["short line", row("00000000:1E61", "00000000:0000", "0A", 0, "556")],
+                   tcp6=None, udp=None, udp6=None)
+    monkeypatch.setattr(listeners, "PROC", tmp_path / "proc")
+    rows = no_crash(listeners.proc_sockets, "TCP")
+    assert [(r["host"], r["port"], r["uid"]) for r in rows] == [("0.0.0.0", "7777", 0)]
+    lsof = "\n".join([LSOF_HDR, "weird TCP", "TCP *:1", "x 1 m 3u IPv4 0x1 0t0 TCP *:7000 (LISTEN)"])
+    assert [(r["host"], r["port"]) for r in no_crash(listeners.parse_lsof, lsof, "TCP")] == [("*", "7000")]
+
+
+def test_proc_owners_map_only_our_sockets_and_the_parent_wins(monkeypatch, tmp_path):
+    plant_proc(tmp_path, 300, comm="nginx", fds={3: "socket:[555]", 4: "socket:[999]", 5: "/tmp/x/socket:[556]"})
+    plant_proc(tmp_path, 1200, comm="nginx-worker", fds={3: "socket:[555]"})
+    plant_proc(tmp_path, 41, comm="decoy", fds={7: "/home/me/socket:[556]"})
+    monkeypatch.setattr(listeners, "PROC", tmp_path / "proc")
+    assert listeners._inode_owners({"555", "556"}) == {"555": ("300", "nginx")}
+
+
+def test_a_readable_but_empty_proc_listing_is_checked(monkeypatch, tmp_path):
+    plant_proc_net(tmp_path, tcp=[row("0100007F:1F90", "0100007F:A2A9", "01", 1000, "557")], tcp6=[], udp=[],
+                   udp6=[])
+    env(monkeypatch, tmp_path, ss_tcp=None, ss_udp=None)
+    assert check_network() == []
+
+
+def test_a_failed_tailscale_answer_is_not_trusted(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, tailscale=(TS_JSON, 1), ss_tcp=ss('LISTEN 0 4096 100.80.54.90:56893 0.0.0.0:*'))
+    f = one(check_network())
+    assert (f.severity, f.title) == ("medium", "Unexpected listening port: 56893")
+
+
+def test_peer_api_urls_are_normalised():
+    out = json.dumps({"Self": {"TailscaleIPs": ["fd7a:115c:a1e0::1"],
+                               "PeerAPIURL": ["http://[fd7a:115c:a1e0:0:0:0:0:1]:4001"]}})
+    assert listeners.tailnet(lambda cmd, timeout=30: (out, 0), macos=False) == (
+        {"fd7a:115c:a1e0::1"}, {("fd7a:115c:a1e0::1", "4001")})
+
+
+def test_a_port_guess_never_unskips_80_or_443(monkeypatch, tmp_path):
+    monkeypatch.setattr(listeners, "REMOTE_PORTS",
+                        listeners.REMOTE_PORTS + (("TCP", 443, 443, "remote desktop", "Guess", "rdp"),))
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 1 0.0.0.0:443 0.0.0.0:* ino:1 sk:1 <->'))
+    assert check_network() == []
+
+
+def test_shared_sockets_name_each_program_once(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, ss_tcp=ss(
+        'LISTEN 0 1 0.0.0.0:8080 0.0.0.0:* users:(("nginx",pid=20,fd=6),("nginx",pid=19,fd=6)) uid:33 ino:5 sk:9 <->'))
+    f = one(check_network())
+    assert "Program: nginx (pid 20), user " in f.description
+    assert f.check == "network"
+
+
+def test_netstat_reads_only_its_own_protocol_and_real_addresses():
+    mixed = "\n".join([NETSTAT_HDR, "tcp4 0 0 *.22 *.* LISTEN", "udp4 0 0 *.5353 *.*", "udp4 0 0 5354 *.*",
+                       "udp4 0 0 192.168.1.5.500 1.2.3.4.500"])
+    assert [(r["proto"], r["host"], r["port"]) for r in listeners.parse_netstat(mixed, "UDP")] == [
+        ("UDP", "*", "5353")]
+    assert [(r["proto"], r["port"]) for r in listeners.parse_netstat(mixed, "TCP")] == [("TCP", "22")]
+
+
+def test_macos_names_with_spaces_and_root_tailscaled(monkeypatch, tmp_path):
+    lsof_tcp = "\n".join([LSOF_HDR, "Google\\x20Chrome 900 m 30u IPv4 0x9 0t0 TCP 127.0.0.1:9222 (LISTEN)",
+                          "tailscaled 77 root 5u IPv4 0x7 0t0 TCP 100.80.54.90:41000 (LISTEN)"])
+    env(monkeypatch, tmp_path, mac=True, lsof_tcp=lsof_tcp, lsof_udp=("", 1), netstat_tcp="", netstat_udp="")
+    found = by_port(check_network())
+    assert found[("TCP", "9222")].details["programs"] == ["Google Chrome"]
+    ts = found[("TCP", "41000")]
+    assert (ts.severity, ts.title, ts.details["uid"]) == ("info", "Tailscale (tailscaled) on port 41000", 0)
+
+
+def test_a_remote_desktop_named_by_its_unit(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, ss_tcp=ss(
+        'LISTEN 0 2 *:3389 *:* uid:115 ino:12 sk:7 cgroup:/system.slice/xrdp.service <->'))
+    f = one(check_network())
+    assert (f.severity, f.title, f.details["identified_by"]) == ("high", "Remote desktop (xrdp) on port 3389", "unit")
+    assert f.remediation.startswith("Switch it off: `sudo systemctl disable --now xrdp xrdp-sesman`")
+
+
+def test_only_the_machines_own_tailscaled_unit_counts(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, ss_tcp=ss(
+        'LISTEN 0 1 100.80.54.90:41000 0.0.0.0:* ino:1 sk:1 '
+        'cgroup:/system.slice/docker-1.scope/system.slice/tailscaled.service <->'))
+    f = one(check_network())   # a container's tailscaled is still named, but isn't the machine's own: not info
+    assert (f.severity, f.title) == ("medium", "Tailscale (tailscaled) on port 41000")
+    assert "running as root" not in f.description
+
+
+def test_a_port_is_tailscales_only_if_every_socket_on_it_is(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, tailscale=TS_JSON, ss_tcp=ss('LISTEN 0 4096 100.80.54.90:56893 0.0.0.0:*',
+                                                            'LISTEN 0 4096 192.168.1.5:56893 0.0.0.0:*'))
+    f = one(check_network())
+    assert (f.severity, f.title) == ("medium", "Unexpected listening port: 56893")
+    assert "reachable from other machines" in f.description

@@ -19,8 +19,8 @@ finding says "likely". A socket whose program Sereno can't see is reported with 
 never passed over. Command lines are never read, because they can hold passwords (x11vnc -passwd does).
 
 What's reported (the reachability rules of 0060f82 stand):
-- high: remote control that other machines can reach (a remote desktop, or SSH on any port but 22), whatever port it
-  is on;
+- high: remote control that other machines can reach (a remote desktop, or SSH on any port but 22), on any TCP port
+  and on remote desktops' own UDP ports;
 - medium: any other TCP port other machines can reach, except 22, 80 and 443; UDP services on ports up to 1024,
   beyond the common client ones; a protocol whose ports couldn't be listed at all ("not checked");
 - info: what only this machine can reach; Tailscale's own listeners on its tailnet addresses; ports in expected.json.
@@ -116,7 +116,8 @@ UNIT_PROGRAMS = {"ssh": "sshd", "nxserver": "nxd", "postgresql": "postgres", "do
 # How to switch remote control off, each with its undo. {port}, {display} (VNC display) and {grd} (rdp or vnc) are
 # filled in.
 OFF = {
-    "grd": "Switch it off in Settings > System > Remote Desktop, or run `grdctl {grd} disable` and "
+    "grd": "Switch it off in Settings > System > Remote Desktop (older GNOME: Settings > Sharing), or run "
+           "`grdctl {grd} disable` and "
            "`systemctl --user disable --now gnome-remote-desktop` (undo: `grdctl {grd} enable` and "
            "`systemctl --user enable --now gnome-remote-desktop`). If it's the login screen's remote login (the system "
            "service), the same with sudo: `sudo grdctl --system {grd} disable` and "
@@ -142,8 +143,8 @@ OFF = {
                   "quit TeamViewer.",
     "nomachine": "Switch it off: `sudo /etc/NX/nxserver --shutdown`, then `sudo /etc/NX/nxserver --startmode manual` "
                  "so it doesn't start at boot (undo: `--startmode automatic`, then `--startup`).",
-    "macos_sharing": "Switch it off: System Settings > General > Sharing, turn off Screen Sharing and Remote "
-                     "Management (undo: turn them back on).",
+    "macos_sharing": "Switch it off: System Settings > General > Sharing (System Preferences > Sharing on older "
+                     "macOS), turn off Screen Sharing and Remote Management (undo: turn them back on).",
     "rdp": "If it's GNOME's remote login: Settings > System > Remote Desktop, or `sudo grdctl --system rdp disable` "
            "(undo: `sudo grdctl --system rdp enable`). If it's xrdp: `sudo systemctl disable --now xrdp` (undo: "
            "`sudo systemctl enable --now xrdp`).",
@@ -164,10 +165,9 @@ def loopback(host: str) -> bool:
 
 
 def _norm(host: str) -> str:
-    """An address in one spelling: no brackets or zone, IPv6 compressed, any wildcard as "*"."""
+    """An address in one spelling: no brackets or zone, IPv6 compressed. (lsof and netstat both write "*" for any
+    address, so the wildcard needs no mapping.)"""
     h = host.split("%", 1)[0].strip("[]").lower()
-    if h in ("*", "0.0.0.0", "::"):
-        return "*"
     try:
         return str(ipaddress.ip_address(h))
     except ValueError:
@@ -204,9 +204,9 @@ def parse_ss(output: str, proto: str) -> list:
     """Sockets from `ss -tlnp -e` or `ss -ulnp -e` output. ss -e prints uid: only when it isn't 0, so a line with ino:
     and no uid: is root's; a line with neither (an old ss, or no -e) has no known owner."""
     socks = []
-    for line in output.splitlines():
+    for line in output.splitlines():  # a header line has no host:port in the address column, so it's skipped below
         f = line.split()
-        if not f or f[0] in ("State", "Netid"):
+        if not f:
             continue
         p = proto
         if f[0].lower() in ("tcp", "udp"):  # ss prints the protocol first when asked for both
@@ -270,7 +270,7 @@ def _inode_owners(inodes: set) -> dict:
     """socket inode -> (pid, program name), for the processes whose fd folder Sereno may read."""
     owners = {}
     try:
-        pids = [p for p in os.listdir(str(PROC)) if p.isdigit()]
+        pids = sorted((p for p in os.listdir(str(PROC)) if p.isdigit()), key=int)  # a shared socket: the parent
     except OSError:
         return owners
     for pid in pids:
@@ -366,7 +366,7 @@ def _gather_macos(run):
     socks, unchecked = [], []
     for proto, lsof_args, family in (("TCP", ["-iTCP", "-sTCP:LISTEN"], "tcp"), ("UDP", ["-iUDP"], "udp")):
         output, rc = run(["lsof", "+c", "0", "-nP"] + lsof_args)
-        seen = parse_lsof(output, proto) if rc == 0 else []  # lsof exits 1 when it has nothing to list
+        seen = parse_lsof(output, proto)  # lsof exits 1 when it has nothing to list, so rc only says "not checked"
         stat, src = run(["netstat", "-an", "-p", family])
         if rc != 0 and src != 0:
             unchecked.append(proto)
@@ -375,10 +375,10 @@ def _gather_macos(run):
         socks += seen + hidden
     pids = sorted({s["pid"] for s in socks if s["pid"]})
     if pids:
-        output, rc = run(["ps", "-o", "pid=,comm=", "-p", ",".join(pids)])
+        output, _ = run(["ps", "-o", "pid=,comm=", "-p", ",".join(pids)])  # a ps that fails prints nothing
         exes = dict(line.strip().split(None, 1) for line in output.splitlines() if len(line.split(None, 1)) == 2)
         for s in socks:
-            s["exe"] = exes.get(s["pid"], "") if rc == 0 else ""
+            s["exe"] = exes.get(s["pid"], "")
     return socks, unchecked
 
 
@@ -542,16 +542,17 @@ def _how(ident, members, proto, port) -> str:
     hit = _remote_port(proto, port)
     hint = SERVICE_PORTS.get((proto, port)) or ("%s (%s)" % hit[:2] if hit else "")
     said = {"program": "Named by its program.", "unit": "Named by its systemd unit."}.get(how, "")
-    if hint and hint != ident["label"]:
+    if hint and hint.lower() not in ident["label"].lower():  # "DNS resolver (systemd-resolved)" needn't add "DNS"
         said += " Port %s is the usual port for %s." % (port, hint)
     return said.strip()
 
 
-def _remediation(ident, port, local, macos, visible, expected) -> str:
+def _remediation(ident, port, local, macos, visible, expected, root) -> str:
     if expected:
         return ""
-    find = ("" if visible or ident["how"] in ("program", "unit") else "To see which program it is: `sudo %s`. " % (
-        "lsof -nP -i :%s" % port if macos else "ss -ltnup 'sport = :%s'" % port))
+    # Running as root already shows every program: a socket still without one is the kernel's, and sudo can't add more
+    find = ("" if visible or root or ident["how"] in ("program", "unit") else "To see which program it is: `sudo %s`. "
+            % ("lsof -nP -i :%s" % port if macos else "ss -ltnup 'sport = :%s'" % port))
     if ident["kind"] == "tailscale":
         if local or ident.get("tailnet_only"):
             return "Nothing to do: Tailscale runs this, and your tailnet's access rules decide which devices reach it."
@@ -639,7 +640,7 @@ def check_listeners(make, run, macos: bool, expected: set) -> list:
         first = members[0]
         shown = next((s for s in members if s["programs"]), first)
         out.append(make(severity, title, description,
-                        _remediation(ident, port, local, macos, visible, is_expected),
+                        _remediation(ident, port, local, macos, visible, is_expected, euid == 0),
                         {"port": port, "proto": proto, "host": first["host"], "hosts": hosts, "line": first["line"],
                          "loopback": local, "expected": is_expected, "service": ident["label"],
                          "identified_by": ident["how"], "programs": shown["programs"], "pid": shown["pid"],

@@ -10,7 +10,7 @@ What changed in Sereno, in plain words. Newest first. To get the changes, run `g
   unit, or by the port alone ("likely ..."). A port whose program can't be seen without sudo says so, and is still
   reported.
   - Remote control that other machines can reach (a remote desktop such as RDP, VNC, NoMachine, RustDesk, AnyDesk or
-    TeamViewer, or SSH on a port other than 22) is now high on any port, with the command that switches it off and the
+    TeamViewer, or SSH on a port other than 22) is now high on any TCP port, with the command that switches it off and the
     one that undoes it. SSH on port 22 isn't reported, as before.
   - Tailscale's own listeners on your tailnet addresses are info, recognised when `tailscale status --json` lists them
     as this machine's peer API, or when they belong to root's `tailscaled`.
