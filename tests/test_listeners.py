@@ -133,10 +133,10 @@ def test_vnc_by_port_with_the_owner_hidden_is_high(monkeypatch, tmp_path):
 
 def test_tailscale_peer_api_from_its_status_json_is_info(monkeypatch, tmp_path):
     calls = env(monkeypatch, tmp_path, tailscale=TS_JSON, ss_tcp=ss(
-        'LISTEN 0 4096 100.80.54.90:56893 0.0.0.0:*',
+        'LISTEN 0 4096 100.80.54.90%tailscale0:56893 0.0.0.0:*',          # bound to the device: ss adds the zone
         'LISTEN 0 4096 [fd7a:115c:a1e0::c636:365a]:59823 [::]:*'))
     found = by_port(check_network())
-    for port, host in (("56893", "100.80.54.90"), ("59823", "[fd7a:115c:a1e0::c636:365a]")):
+    for port, host in (("56893", "100.80.54.90"), ("59823", "fd7a:115c:a1e0::c636:365a")):
         f = found[("TCP", port)]
         assert f.severity == "info", port
         assert f.title == "Tailscale peer API (tailscaled) on port %s" % port
@@ -448,7 +448,8 @@ def test_without_tailscale_the_rule_is_skipped_quietly(monkeypatch, tmp_path):
 
 def test_tailscale_is_asked_only_when_a_socket_is_on_a_tailscale_address(monkeypatch, tmp_path):
     calls = env(monkeypatch, tmp_path, tailscale=TS_JSON, ss_tcp=ss('LISTEN 0 1 0.0.0.0:7000 0.0.0.0:*',
-                                                                    'LISTEN 0 1 100.128.0.1:7001 0.0.0.0:*'))
+                                                                    'LISTEN 0 1 100.128.0.1:7001 0.0.0.0:*',
+                                                                    'LISTEN 0 1 *:7002 *:*'))
     check_network()
     assert not [c for c in calls if c[0][0] == "tailscale"]
     calls = env(monkeypatch, tmp_path, tailscale=TS_JSON, ss_tcp=ss('LISTEN 0 1 [fd7a:115c:a1e0::1]:7000 [::]:*'))
@@ -665,6 +666,10 @@ def test_proc_owners_map_only_our_sockets_and_the_parent_wins(monkeypatch, tmp_p
     plant_proc(tmp_path, 1200, comm="nginx-worker", fds={3: "socket:[555]"})
     plant_proc(tmp_path, 41, comm="decoy", fds={7: "/home/me/socket:[556]"})
     monkeypatch.setattr(listeners, "PROC", tmp_path / "proc")
+    real = os.listdir
+    # The directory's own order is the filesystem's (ext4 hashes names); hand it over child first, as it may come
+    monkeypatch.setattr(listeners.os, "listdir",
+                        lambda p: ["1200", "net", "41", "300"] if p == str(tmp_path / "proc") else real(p))
     assert listeners._inode_owners({"555", "556"}) == {"555": ("300", "nginx")}
 
 

@@ -167,7 +167,7 @@ def loopback(host: str) -> bool:
 def _norm(host: str) -> str:
     """An address in one spelling: no brackets or zone, IPv6 compressed. (lsof and netstat both write "*" for any
     address, so the wildcard needs no mapping.)"""
-    h = host.split("%", 1)[0].strip("[]").lower()
+    h = host.split("%", 1)[0].strip("[]")
     try:
         return str(ipaddress.ip_address(h))
     except ValueError:
@@ -283,7 +283,7 @@ def _inode_owners(inodes: set) -> dict:
                 target = os.readlink(str(PROC / pid / "fd" / fd))
             except OSError:
                 continue
-            m = re.match(r"^socket:\[(\d+)\]$", target)
+            m = re.match(r"socket:\[(\d+)\]", target)  # a file's link is an absolute path, never this
             if m and m.group(1) in inodes and m.group(1) not in owners:
                 try:
                     comm = (PROC / pid / "comm").read_text().strip()
@@ -536,7 +536,7 @@ def _how(ident, members, proto, port) -> str:
     if how == "tailscale status":
         s = members[0]
         return ("Identified by `tailscale status --json`, which lists %s port %s as this machine's peer API; it's bound "
-                "only to this machine's tailnet address." % (s["host"], port))
+                "only to this machine's tailnet address." % (_norm(s["host"]), port))
     if how == "port":
         return "Named by its port alone (%s is the usual port for it), so this is a likely guess, not a fact." % port
     hit = _remote_port(proto, port)
