@@ -573,81 +573,29 @@ def _expected_ports() -> tuple:
                               remediation=f"Fix or remove {path}.", details={"path": str(path)})
 
 
-# 22, 80 and 443 are what a machine is usually meant to serve; they aren't reported.
-COMMON_TCP = {"22", "80", "443"}
-# UDP services a machine runs as a client or for the local network: DHCP, NTP, NetBIOS name and datagram, DHCPv6.
-COMMON_UDP = {"67", "68", "123", "137", "138", "546", "547"}
-
-
-def _listen_address(line: str):
-    """(host, port) from one line of ss or lsof output: the first host:port token. None if there isn't one."""
-    for part in line.split():
-        m = re.match(r"^(.*):(\d+)$", part)
-        if m and m.group(1) not in ("", "0.0.0.0:*"):
-            return m.group(1), m.group(2)
-    return None
-
-
 def _loopback(host: str) -> bool:
-    h = host.split("%", 1)[0].strip("[]")
-    return h.startswith("127.") or h in ("::1", "localhost") or h.startswith("::ffff:127.")
+    from .listeners import loopback
+    return loopback(host)
 
 
 def check_network() -> list[Finding]:
-    """Listening ports. TCP: every listener except 22, 80 and 443, low ports included (until 2026-10-23 every port at
-    or below 1024 was skipped, so a listener on 444 went unseen). Open to other machines: medium; bound to this machine
-    only (127.x, ::1): info. UDP: services on ports at or below 1024 open to other machines, beyond the common client
-    ones (high UDP ports are mostly clients' ephemeral sockets, so they aren't reported)."""
+    """Listening ports, TCP and UDP, each tied to its program and binary where visible and named when it's a known
+    service (sentinel/listeners.py, 2026-10-24). TCP: every listener except 22, 80 and 443, low ports included. Open to
+    other machines: medium, or high for remote control (a remote desktop, or SSH off port 22) whatever the port; bound
+    to this machine only (127.x, ::1): info. UDP: services on ports at or below 1024 open to other machines, beyond the
+    common client ones, and remote control's own UDP ports. Tailscale's listeners on its tailnet addresses: info."""
+    from .listeners import check_listeners
     findings = []
     expected, problem = _expected_ports()
     if problem is not None:
         findings.append(problem)
     if not (_is_linux() or _is_macos()):
         return findings
-    if _is_macos():
-        listings = [("TCP", _run(["lsof", "-iTCP", "-sTCP:LISTEN", "-nP"])),
-                    ("UDP", _run(["lsof", "-iUDP", "-nP"]))]
-    else:
-        listings = [("TCP", _run(["ss", "-tlnp"])), ("UDP", _run(["ss", "-ulnp"]))]
-    seen = set()
-    for proto, (output, rc) in listings:
-        if rc != 0 or not output:
-            continue
-        for line in output.splitlines()[1:]:
-            addr = _listen_address(line)
-            if addr is None:
-                continue
-            host, port = addr
-            local = _loopback(host)
-            if proto == "TCP" and port in COMMON_TCP:
-                continue
-            if proto == "UDP" and (int(port) > 1024 or local or port in COMMON_UDP):
-                continue
-            if (proto, host, port) in seen:
-                continue
-            seen.add((proto, host, port))
-            where = "this machine only" if local else "other machines"
-            if port in expected:
-                findings.append(Finding(
-                    check="network",
-                    severity="info",
-                    title=f"Listening port {port} (expected by operator)",
-                    description=f"Port {port} is listed in expected.json. Line: {line.strip()[:120]}",
-                    remediation="",
-                    details={"port": port, "line": line.strip(), "expected": True, "proto": proto, "host": host},
-                ))
-            else:
-                findings.append(Finding(
-                    check="network",
-                    severity="info" if local else "medium",
-                    title=(f"Unexpected listening port: {port}" + ("" if proto == "TCP" else " (UDP)")
-                           + (" (this machine only)" if local else "")),
-                    description=(f"Something is listening on {proto} port {port}, reachable from {where}. "
-                                 f"Line: {line.strip()[:120]}"),
-                    remediation=(f"Check what's using port {port}. If you don't recognize it, investigate. "
-                                 f"If you run it on purpose, add {port} to expected.json."),
-                    details={"port": port, "line": line.strip(), "proto": proto, "host": host, "loopback": local},
-                ))
+
+    def make(severity, title, description, remediation, details):
+        return Finding(check="network", severity=severity, title=title, description=description,
+                       remediation=remediation, details=details)
+    findings.extend(check_listeners(make, _run, _is_macos(), expected))
     return findings
 
 

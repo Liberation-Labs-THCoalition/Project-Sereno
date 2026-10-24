@@ -2,6 +2,24 @@
 
 What changed in Sereno, in plain words. Newest first. To get the changes, run `git pull` in your Project-Sereno folder.
 
+## 2026-10-24
+
+- **Network check: every port, named.** Each listening port, TCP and UDP, now shows the program behind it and the
+  program's file where Sereno can see them, and known services are named: "remote desktop (gnome-remote-desktop) on
+  port 3390" instead of "unexpected listening port 3390". Each finding says how it knew: by the program, by its systemd
+  unit, or by the port alone ("likely ..."). A port whose program can't be seen without sudo says so, and is still
+  reported.
+  - Remote control that other machines can reach (a remote desktop such as RDP, VNC, NoMachine, RustDesk, AnyDesk or
+    TeamViewer, or SSH on a port other than 22) is now high on any port, with the command that switches it off and the
+    one that undoes it. SSH on port 22 isn't reported, as before.
+  - Tailscale's own listeners on your tailnet addresses are info, recognised when `tailscale status --json` lists them
+    as this machine's peer API, or when they belong to root's `tailscaled`.
+  - If Sereno can't list the ports at all, it says "Listening ports not checked" (medium) instead of nothing. Without
+    `ss`, it reads `/proc/net` directly.
+  - On macOS, the system's own listeners are listed too (from `netstat`), and a connected UDP socket is no longer
+    mistaken for a listening port.
+  - Never read: a program's command line, which can hold passwords.
+
 ## 2026-10-23
 
 - **Honest results.** What Sereno says now matches what it checked. (b80e1f2)

@@ -55,7 +55,7 @@ The commands say `sentinel`, not `sereno`. That's the name of Sereno's code fold
 | **Supply chain: pip** | Python packages that `pip3 list` shows, checked against Sereno's pip list. That's one Python install: packages in your other virtual environments aren't on it. An exact known-bad version is critical. A listed package whose bad versions aren't given is reported as high, so you can check yours. |
 | **Persistence** | Ways malware makes itself start again: the Shai-Hulud worm's files anywhere in your home folder (its token monitor, also as a systemd service or macOS LaunchAgent, and its payload files; `setup.mjs` and `sysmon.py` are common names, so alone they're a note, and critical only next to the worm's other files or naming them), VS Code tasks that call them, Claude Code hooks, and Python startup files that run code. More below. |
 | **Processes** | Running programs with names known from malware: the Shai-Hulud token monitor and payloads, cryptominers such as xmrig, and reverse shells. |
-| **Network** | Programs waiting for connections (listening ports). Every TCP port except 22, 80 and 443: medium if other machines can reach it, info if only this machine can. UDP services on ports up to 1024 that other machines can reach, except common ones (DHCP, NTP, NetBIOS). |
+| **Network** | Programs waiting for connections (listening ports), each named where Sereno can tell: "remote desktop (gnome-remote-desktop) on port 3390", not just "port 3390". Every TCP port except 22, 80 and 443: medium if other machines can reach it, info if only this machine can. Remote control that other machines can reach (a remote desktop such as RDP, VNC, NoMachine, RustDesk, AnyDesk or TeamViewer, or SSH on a port other than 22) is high on any port, with how to switch it off. UDP services on ports up to 1024 that other machines can reach, except common ones (DHCP, NTP, NetBIOS), and remote desktops' UDP ports. Tailscale's own listeners on your tailnet addresses are info. |
 | **Credentials** | Tokens in `~/.npmrc` (high), and lines that look like API keys, tokens or passwords in files named `.env` under your home folder (medium). |
 | **Git repos** | Dune-themed branch names, which the Shai-Hulud worm used to carry stolen data out, in the git repositories under your home folder. |
 | **MCP servers** | AI coding tools (Claude Code, Claude Desktop, Cursor, VS Code, Windsurf, Gemini CLI, and Codex on Python 3.11+) starting MCP servers with no fixed version (`npx -y some-server`, `uvx some-server`): medium, or high if the package is on Sereno's lists. API keys written in plain text in their configs, named, never shown: medium, or high if git tracks the file. Project `.mcp.json`, `.cursor/mcp.json` and `.vscode/mcp.json` files count too. |
@@ -78,7 +78,16 @@ A plain hook in your own settings isn't reported: it's yours.
 
 **Files Sereno can't read.** A Claude Code settings file or MCP config that Sereno can't read is reported as "not checked" (info), never as clean.
 
-**Expected ports.** Sereno reports every listening TCP port except 22, 80 and 443, and UDP services on ports up to 1024; a port only this machine can reach (127.0.0.1, ::1) is info. To mark the ones you run on purpose, list them in `$SENTINEL_HOME/expected.json` (default `~/.sentinel/expected.json`) as `{"ports": [11434, 5432]}`. They are still reported, as info ("expected by operator"), so you can always see what is listening, but they won't alert.
+**Expected ports.** Sereno reports every listening TCP port except 22, 80 and 443, and UDP services on ports up to 1024; a port only this machine can reach (127.0.0.1, ::1) is info. To mark the ones you run on purpose, list them in `$SENTINEL_HOME/expected.json` (default `~/.sentinel/expected.json`) as `{"ports": [11434, 5432]}`. They are still reported, as info ("expected by operator"), so you can always see what is listening, but they won't alert. That holds for a remote desktop you use on purpose too.
+
+**How Sereno names a port, and how sure it is.** Each finding says how it told what the port is:
+
+- **By its program** (and the program's file on disk): a fact. Linux shows Sereno the program only for your own programs unless you run it with sudo.
+- **By its systemd unit**, which current Linux systems show for every socket (older `ss` versions don't): a fact, used when the program isn't visible.
+- **By its port alone** ("Likely remote desktop (VNC) on port 5901"): a guess, used only when the program isn't visible. The finding says "owner not visible without sudo" and how to look: `sudo ss -ltnup 'sport = :5901'`.
+- **Tailscale's own listeners** are info when they're bound only to your tailnet addresses and Sereno can tell they're Tailscale's: `tailscale status --json` lists that exact address and port as this machine's peer API, or the socket belongs to root's `tailscaled` (its program, or its system unit). A program that only calls itself tailscaled doesn't count.
+
+A port whose program Sereno can't see is still reported, never treated as clean. If Sereno can't list the ports at all, it says "Listening ports not checked" (medium).
 
 ## What Sereno reads, and what leaves your machine
 
@@ -89,7 +98,7 @@ Sereno reads. It doesn't change your files. It writes only its own files in `$SE
 | Supply chain | Package folder names in the `node_modules` folders under your home, and the `package.json` of each package that's on the list or under a listed scope. Package names and versions from `pip3 list`. |
 | Persistence | File names across your home folder. Claude Code settings files, and the project list in `~/.claude.json`. VS Code `tasks.json` files. `.pth`, `sitecustomize.py` and `usercustomize.py` files under your home. |
 | Processes | The process list (`ps aux`), which includes each program's full command line. |
-| Network | The listening ports (`ss` on Linux, `lsof` on macOS) and your `expected.json`. |
+| Network | The listening ports with their program, user and systemd unit (`ss` on Linux, or `/proc/net` when `ss` is missing; `lsof` and `netstat` on macOS), the program's file path (`/proc/<pid>/exe` on Linux, `ps` on macOS), and your `expected.json`. When a port is on a Tailscale address, `tailscale status --json`, which asks the Tailscale program on your machine, not the network. Never a program's command line, which can hold passwords. |
 | Credentials | `~/.npmrc` and `.env` files under your home. |
 | Git repos | Branch names in each repository under your home (`git branch -a`). |
 | MCP servers | The MCP config files of the tools listed above, and `~/.claude.json`, which holds Claude Code's servers and project list. For a config holding a secret, it asks git whether the file is tracked. |
@@ -213,7 +222,7 @@ No API keys. No accounts. No subscription.
 
 - Python 3.8+ (3.11+ to check Codex's MCP config)
 - Linux or macOS (on Windows, use WSL)
-- That's it. Sereno uses tools those systems already have: `ps`, `ss` or `lsof`, and `git` and `pip` when they're installed.
+- That's it. Sereno uses tools those systems already have: `ps`, `ss` (Linux) or `lsof` and `netstat` (macOS), and `git`, `pip` and `tailscale` when they're installed.
 
 ## Born From a Real Incident
 
