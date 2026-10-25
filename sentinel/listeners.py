@@ -19,9 +19,10 @@ a guess, and the finding says "likely". A unit a user or a container named can m
 only raises the alarm) but never as an ordinary service. A socket whose program Sereno can't see is reported with
 "owner not visible without sudo", never passed over. Program names are chosen by the programs, so ss's users block is
 read by its structure, and the owner's user id only from the fields after it. Command lines are never read, because
-they can hold passwords (x11vnc -passwd does); for an SSH server's program, its session and its parent's and
-grandparent's names and users are read from /proc/<pid>/stat, comm and status, to tell a login's forwarded port from a
-server. Names read from /proc may hold any bytes; one that isn't UTF-8 is replaced, never fatal.
+they can hold passwords (x11vnc -passwd does); for an SSH server's program, its session and its parent's name and user
+are read from /proc/<pid>/stat, comm and status, and which sockets that parent holds from the links in its fd folder,
+to tell a login's forwarded port from a server. Names read from /proc may hold any bytes; one that isn't UTF-8 is
+replaced, never fatal.
 
 What's reported (the reachability rules of 0060f82 stand):
 - high: remote control that other machines can reach (a remote desktop, or SSH on any port but 22), on any TCP port
@@ -217,9 +218,9 @@ def _lookup(table: dict, names):
     return None
 
 
-def _sock(proto, host, port, line, programs=(), pid="", uid=None, user="", cgroup=""):
+def _sock(proto, host, port, line, programs=(), pid="", uid=None, user="", cgroup="", inode=""):
     return {"proto": proto, "host": host, "port": port, "line": line, "programs": list(programs), "pid": pid,
-            "uid": uid, "user": user, "cgroup": cgroup, "exe": ""}
+            "uid": uid, "user": user, "cgroup": cgroup, "inode": inode, "exe": ""}
 
 
 # ── Linux ──
@@ -252,16 +253,16 @@ def _users_block(text: str):
 
 
 def _details(text: str):
-    """(uid, cgroup) from the fields ss -e prints after the users block, in this order: uid:N (left out when it's 0),
-    ino:N, sk:X, then fwmark: and cgroup: when set. They're read from the left, so a cgroup folder's name, which a
-    user may choose, can't pose as an earlier field. Without ino: (an old ss, or no -e) the owner is unknown."""
+    """(uid, cgroup, socket inode) from the fields ss -e prints after the users block, in this order: uid:N (left out
+    when it's 0), ino:N, sk:X, then fwmark: and cgroup: when set. They're read from the left, so a cgroup folder's name,
+    which a user may choose, can't pose as an earlier field. Without ino: (an old ss, or no -e) the owner is unknown."""
     toks = text.split()
     uid = int(toks[0][4:]) if toks and re.match(r"uid:\d+$", toks[0]) else None
     rest = toks[1:] if uid is not None else toks
     if not (rest and re.match(r"ino:\d+$", rest[0])):
-        return None, ""
+        return None, "", ""
     cgroup = next((t[len("cgroup:"):] for t in rest[1:] if t.startswith("cgroup:")), "")
-    return (0 if uid is None else uid), cgroup
+    return (0 if uid is None else uid), cgroup, rest[0][len("ino:"):]
 
 
 def parse_ss(output: str, proto: str) -> list:
@@ -281,9 +282,9 @@ def parse_ss(output: str, proto: str) -> list:
             continue
         # After the address columns: the users block (programs Sereno may see), then the -e fields
         procs, rest = _users_block(line[cols[first + 4].end():].lstrip() if len(f) > first + 4 else "")
-        uid, cgroup = _details(rest or "")
+        uid, cgroup, inode = _details(rest or "")
         socks.append(_sock(p, m.group(1), m.group(2), line.strip(), [n for n, _ in procs],
-                           procs[0][1] if procs and rest is not None else "", uid, cgroup=cgroup))
+                           procs[0][1] if procs and rest is not None else "", uid, cgroup=cgroup, inode=inode))
     return socks
 
 
@@ -315,7 +316,7 @@ def proc_sockets(proto: str):
                 continue
             addr, _, port = f[1].partition(":")
             try:
-                s = _sock(proto, _hex_host(addr), str(int(port, 16)), line.strip(), uid=int(f[7]))
+                s = _sock(proto, _hex_host(addr), str(int(port, 16)), line.strip(), uid=int(f[7]), inode=f[9])
             except (ValueError, OSError):
                 continue
             socks.append(s)
@@ -335,6 +336,20 @@ def _proc_text(path) -> str:
     return path.read_bytes().decode("utf-8", "replace")
 
 
+def _socket_inodes(pid: str) -> list:
+    """The inodes of the sockets a process holds, from the links in /proc/<pid>/fd (no file is opened). OSError when
+    the folder can't be read: another user's process, without sudo."""
+    inodes = []
+    for fd in os.listdir(str(PROC / pid / "fd")):
+        try:  # a file's link is an absolute path, never this
+            m = re.match(r"socket:\[(\d+)\]", os.readlink(str(PROC / pid / "fd" / fd)))
+        except OSError:
+            continue  # it closed since the folder was listed
+        if m:
+            inodes.append(m.group(1))
+    return inodes
+
+
 def _inode_owners(inodes: set) -> dict:
     """socket inode -> (pid, program name), for the processes whose fd folder Sereno may read."""
     owners = {}
@@ -348,21 +363,16 @@ def _inode_owners(inodes: set) -> dict:
         if len(owners) == len(inodes):
             break  # every socket has its owner: the rest of /proc needn't be read
         try:
-            fds = os.listdir(str(PROC / pid / "fd"))
+            held = _socket_inodes(pid)
         except OSError:
             continue  # another user's process: not readable without sudo
-        for fd in fds:
-            try:
-                target = os.readlink(str(PROC / pid / "fd" / fd))
-            except OSError:
-                continue
-            m = re.match(r"socket:\[(\d+)\]", target)  # a file's link is an absolute path, never this
-            if m and m.group(1) in inodes and m.group(1) not in owners:
+        for inode in held:
+            if inode in inodes and inode not in owners:
                 try:
                     comm = _proc_text(PROC / pid / "comm").strip()
                 except OSError:
                     comm = "?"
-                owners[m.group(1)] = (pid, comm)
+                owners[inode] = (pid, comm)
     return owners
 
 
@@ -540,34 +550,53 @@ def _program(pid: str):
         comm = _proc_text(PROC / pid / "comm").strip()
         uid = re.search(r"^Uid:\s+\d+\s+(\d+)", _proc_text(PROC / pid / "status"), re.M)
         return comm, int(uid.group(1))
-    except (OSError, AttributeError):
+    except (OSError, AttributeError, ValueError):  # ValueError: an id too long for int (only a planted file has one)
         return None
 
 
 def _parent(pid: str):
-    """(program, effective user id) of a process's parent; None when they can't be read."""
+    """(program, effective user id) of a process's parent; None when they can't be read. (_login reads the stat itself,
+    since it needs the session too; the tests read a parent through this.)"""
     stat = _stat(pid)
     return _program(stat[0]) if stat else None
 
 
-def _ssh_login(s, server) -> bool:
+def _ssh_login(s, server, listening) -> bool:
     """An SSH server's program on a socket that belongs to a login, not to a server: before OpenSSH 9.8 the process
     serving a login is still called sshd, and it holds the ports the login forwards with `ssh -R`. Its parent is the
     same server running as root. For a login as any user but root it's the child the server's per-connection process
     forks, in that process's session (sshd.c, privsep_postauth); for a root login there's no child, so it's the
     per-connection process itself, which leads a session of its own and whose parent is the listening server. A program
     a login starts leads a session of its own too (sshd starts every login's command in a new one, session.c), but its
-    grandparent is the server: that's a second SSH server (`ssh root@host sshd -D -p 2222`). A server someone started
-    has a shell, systemd or a launcher for a parent, so it stays an SSH server, as it does when the parent can't be
-    read."""
-    stat = _stat(s["pid"]) if s["pid"] else None
+    parent is a per-connection process: that's a second SSH server (`ssh root@host sshd -D -p 2222`). So for a session
+    leader the parent decides: the listening server holds one of the listening TCP sockets the scan found (`listening`,
+    their inodes) and isn't itself a login's process. Its name can't tell them apart: Debian's ssh.service has
+    KillMode=process, so after `systemctl restart ssh` an open login's per-connection process has systemd for a parent,
+    as the listening server does, and with inetd it has inetd. A server someone started has a shell, systemd or a
+    launcher for a parent, so it stays an SSH server, as it does when the parent can't be read."""
+    return bool(s["pid"] and _login(s["pid"], server, listening, 0))  # None (can't be told) is an SSH server
+
+
+def _login(pid: str, server, listening, depth: int):
+    """_ssh_login for one process, walking up the SSH servers run as root: True, False, or None when it can't be told
+    (the parent's fd folder can't be read, or more than 16 SSH servers in a row, which only planted /proc files make,
+    a process that is its own ancestor included)."""
+    stat = _stat(pid)
     parent = _program(stat[0]) if stat else None
     if parent is None or parent[1] != 0 or _lookup(REMOTE_PROGRAMS, [parent[0]]) != server:
         return False
-    if stat[1] != s["pid"]:
+    if stat[1] != pid:
         return True  # not a session leader: a login's own process
-    grand = _parent(stat[0])  # None when there's none to read (sshd as a container's first process) or it just left
-    return grand is None or _lookup(REMOTE_PROGRAMS, [grand[0]]) != server
+    if depth >= 16:
+        return None
+    try:
+        holds = any(i in listening for i in _socket_inodes(stat[0]))
+    except OSError:
+        return None  # whether the parent listens isn't known
+    if not holds:
+        return False  # a per-connection process: this is a server a login started
+    up = _login(stat[0], server, listening, depth + 1)  # a listener that is a login's process forwards, not serves
+    return None if up is None else not up
 
 
 def _remote_port(proto: str, port: str):
@@ -594,17 +623,18 @@ def _unseen(s) -> bool:
     return not s["programs"] or set(s["programs"]) <= LAUNCHERS
 
 
-def identify(members, proto, port, ts_ips, ts_api) -> dict:
+def identify(members, proto, port, ts_ips, ts_api, listening=frozenset()) -> dict:
     """What the sockets on one port are: kind ("remote", "tailscale", "service" or ""), label, how it was told
     ("program", "unit", "port", "tailscale status") and, for remote control, how to switch it off. A visible program
     is the best witness; a systemd unit or the port speak only for sockets whose program isn't visible, and a unit
     the system made outranks the port. A name that makes a socket remote control may come from any unit (it only
-    raises the alarm); a name that calls it an ordinary service comes only from a unit the system made."""
+    raises the alarm); a name that calls it an ordinary service comes only from a unit the system made. `listening`:
+    the inodes of the scan's listening TCP sockets, which tell an SSH login's forwarded port from a server."""
     unseen = [s for s in members if _unseen(s)]
     for how, names, among in (("program", _names, members), ("unit", _unit_names, unseen)):
         for s in among:
             hit = _lookup(REMOTE_PROGRAMS, names(s))
-            if hit and not (how == "program" and hit[2] == "ssh" and _ssh_login(s, hit)):
+            if hit and not (how == "program" and hit[2] == "ssh" and _ssh_login(s, hit, listening)):
                 return {"kind": "remote", "label": "%s (%s)" % hit[:2], "how": how, "off": hit[2]}
     reasons = [_tailscale_reason(s, ts_ips, ts_api) for s in members]
     if all(reasons):
@@ -805,13 +835,14 @@ def check_listeners(make, run, macos: bool, expected: set) -> list:
     ts_ips, ts_api = set(), set()
     if any(_tailscale_range(s["host"]) for s in socks):
         ts_ips, ts_api = tailnet(run, macos)
+    listening = {s["inode"] for s in socks if s["proto"] == "TCP"}  # an SSH server listens on TCP
     groups = {}
     for s in socks:
         groups.setdefault((s["proto"], s["port"]), []).append(s)
     for (proto, port), members in groups.items():
         hosts = list(dict.fromkeys(s["host"] for s in members))
         local = all(loopback(h) for h in hosts)
-        ident = identify(members, proto, port, ts_ips, ts_api)
+        ident = identify(members, proto, port, ts_ips, ts_api, listening)
         if not _reported(proto, port, local, ident):
             continue
         # A socket tailscaled itself holds on an address in Tailscale's range is on its tailnet address, even when

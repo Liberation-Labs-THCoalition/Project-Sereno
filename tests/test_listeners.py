@@ -1078,6 +1078,8 @@ def network_scan():
 def test_a_parent_name_that_is_not_utf8_does_not_stop_the_check(monkeypatch, tmp_path):
     plant_parent(tmp_path, 5555, 5000, "x", 1000)
     (tmp_path / "proc" / "5000" / "comm").write_bytes(b"\xff\xfeparent\n")   # a name set with prctl, any bytes
+    (tmp_path / "proc" / "5000" / "status").write_bytes(      # the kernel writes the same bytes in status (Asdf, 10-25)
+        b"Name:\t\xff\xfeparent\nPid:\t5000\nUid:\t1000\t1000\t1000\t1000\n")
     env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=5555,fd=3)) '
                                          'uid:1000 ino:3 sk:3 <->'))
     f = one(network_scan().findings)
@@ -1140,9 +1142,26 @@ LISTENER = [(900, "sshd", 0, 900), (1, "systemd", 0, 1)]
 ROOT_LOGIN = [(5000, "sshd", 0, 5000)] + LISTENER
 
 
+def plant_fds(tmp_path, pid, *inodes):
+    """A process's fd folder: stdin, a pipe, its connection's socket (inode 4040, not a listener), then a socket for
+    each listening socket's inode given."""
+    d = tmp_path / "proc" / str(pid) / "fd"
+    d.mkdir(parents=True, exist_ok=True)
+    for fd, target in enumerate(["/dev/null", "pipe:[77]", "socket:[4040]"] + ["socket:[%s]" % i for i in inodes]):
+        os.symlink(target, str(d / str(fd)))
+
+
+def sshd_22(pid):
+    """Port 22, socket-activated as on Ubuntu 24.04: systemd and the listening server share it, systemd listed first."""
+    return ('LISTEN 0 4096 0.0.0.0:22 0.0.0.0:* users:(("systemd",pid=1,fd=50),("sshd",pid=%s,fd=3)) ino:22 sk:22 '
+            'cgroup:/system.slice/ssh.socket <->' % pid)
+
+
 def test_a_root_logins_forwarded_port_is_a_tunnel(monkeypatch, tmp_path):
     plant_chain(tmp_path, ROOT_LOGIN)
-    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss('LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("sshd",pid=5000,fd=9)) '
+    plant_fds(tmp_path, 900, 22)
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(sshd_22(900),
+                                                 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("sshd",pid=5000,fd=9)) '
                                                  'ino:3 sk:3 cgroup:/user.slice/user-0.slice/session-9.scope <->'))
     f = one(network_scan().findings)
     assert (f.severity, f.title) == ("medium", "SSH reverse tunnel (sshd) on port 8080")
@@ -1173,9 +1192,11 @@ def test_a_users_login_process_is_a_tunnel_in_its_parents_session(monkeypatch, t
 ])
 def test_a_root_logins_process_with_no_grandparent_to_read_is_a_tunnel(monkeypatch, tmp_path, chain, gone):
     plant_chain(tmp_path, chain)
+    plant_fds(tmp_path, chain[1][0], 22)
     if gone:
         (tmp_path / "proc" / str(gone) / "stat").unlink()
-    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss('LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("sshd",pid=%s,fd=9)) '
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(sshd_22(chain[1][0]),
+                                                 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("sshd",pid=%s,fd=9)) '
                                                  'ino:3 sk:3 <->' % chain[0][0]))
     assert one(network_scan().findings).title == "SSH reverse tunnel (sshd) on port 8080"
 
@@ -1231,3 +1252,153 @@ def test_proc_files_that_make_no_sense_leave_an_ssh_server(monkeypatch, tmp_path
                                          'uid:1000 ino:3 sk:3 <->'))
     f = one(network_scan().findings)
     assert (f.severity, f.title) == ("high", "SSH server (sshd) on port 2222")
+
+
+# ── Verify round 2 (2026-10-25) ──
+# Whether an SSH server's process listens is told from its fd folder: the listening server holds one of the listening
+# sockets the scan found; a per-connection process holds its connection and its login's forwards. Its parent's name
+# can't tell them apart: Debian's and Ubuntu's ssh.service has KillMode=process, so `systemctl restart ssh` (which
+# openssh-server upgrades run) leaves open logins running, their per-connection processes adopted by systemd.
+
+FWD = 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("sshd",pid=%s,fd=9)) ino:3 sk:3 <->'
+SECOND = 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=6000,fd=3)) ino:%s sk:5 <->'
+
+
+@pytest.mark.parametrize("chain,listener", [
+    ([(6000, "sshd", 0, 6000), (5000, "sshd", 0, 5000), (1, "systemd", 0, 1)], 950),  # ssh restarted: a new listener
+    ([(6000, "sshd", 0, 6000), (5000, "sshd", 0, 5000), (300, "inetd", 0, 300), (1, "systemd", 0, 1)], 300),  # sshd -i
+])
+def test_a_second_ssh_server_whose_login_outlived_its_listener_is_a_server(monkeypatch, tmp_path, chain, listener):
+    plant_chain(tmp_path, chain)
+    plant_chain(tmp_path, [(950, "sshd", 0, 950), (1, "systemd", 0, 1)])
+    plant_fds(tmp_path, listener, 22)
+    plant_fds(tmp_path, 5000)                    # the root login's process: only its connection
+    plant_fds(tmp_path, 6000, 5)
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(sshd_22(listener), SECOND % 5))
+    f = one(network_scan().findings)
+    assert (f.severity, f.title) == ("high", "SSH server (sshd) on port 2222")
+    assert "a second SSH server is running" in f.remediation
+    assert "It closes when the SSH login" not in f.remediation
+
+
+def test_a_root_login_that_forwards_and_starts_a_second_server(monkeypatch, tmp_path):
+    plant_chain(tmp_path, [(6000, "sshd", 0, 6000)] + ROOT_LOGIN)
+    plant_fds(tmp_path, 900, 22)
+    plant_fds(tmp_path, 5000, 3)                 # the login's forward on 8080: it holds a listener, but is a login
+    plant_fds(tmp_path, 6000, 5)
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(sshd_22(900), FWD % 5000, SECOND % 5))
+    found = by_port(network_scan().findings)
+    assert (found[("TCP", "8080")].severity, found[("TCP", "8080")].title) == (
+        "medium", "SSH reverse tunnel (sshd) on port 8080")
+    assert (found[("TCP", "2222")].severity, found[("TCP", "2222")].title) == ("high", "SSH server (sshd) on port 2222")
+
+
+@pytest.mark.parametrize("readable,severity", [(True, "medium"), (False, "high")])
+def test_a_forward_into_a_second_ssh_server_is_a_tunnel(monkeypatch, tmp_path, readable, severity):
+    # A root login into the second server (its per-connection process 7000) forwards 8080. If the first login's fd
+    # folder can't be read, whether the second server is a login's process can't be told: so neither can the forward's
+    plant_chain(tmp_path, [(7000, "sshd", 0, 7000), (6000, "sshd", 0, 6000)] + ROOT_LOGIN)
+    plant_fds(tmp_path, 900, 22)
+    if readable:
+        plant_fds(tmp_path, 5000)
+    plant_fds(tmp_path, 6000, 5)
+    plant_fds(tmp_path, 7000, 3)
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(sshd_22(900), SECOND % 5, FWD % 7000))
+    found = by_port(network_scan().findings)
+    fwd = found[("TCP", "8080")]
+    assert (fwd.severity, fwd.title) == ((severity, "SSH reverse tunnel (sshd) on port 8080") if readable else
+                                         (severity, "SSH server (sshd) on port 8080"))
+    assert fwd.remediation.startswith("It closes when the SSH login that opened it ends") == readable
+    assert (found[("TCP", "2222")].severity, found[("TCP", "2222")].title) == ("high", "SSH server (sshd) on port 2222")
+
+
+@pytest.mark.parametrize("fds,listed", [
+    (None, True),        # the parent's fd folder can't be read: can't tell, so a server
+    ((), True),          # it holds only its connection
+    ((22,), False),      # what it holds isn't a listening socket this scan found
+    ((22,), "udp"),      # a UDP socket isn't an SSH server's listener
+])
+def test_a_root_logins_forward_needs_its_parent_to_hold_a_listener(monkeypatch, tmp_path, fds, listed):
+    plant_chain(tmp_path, ROOT_LOGIN)
+    if fds is not None:
+        plant_fds(tmp_path, 900, *fds)
+    lines = [FWD % 5000] + ([sshd_22(900)] if listed is True else [])
+    udp = ss('UNCONN 0 0 0.0.0.0:6100 0.0.0.0:* users:(("sshd",pid=900,fd=3)) ino:22 sk:9 <->') if listed == "udp" \
+        else SS_HDR
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(*lines), ss_udp=udp)
+    f = by_port(network_scan().findings)[("TCP", "8080")]
+    assert (f.severity, f.title) == ("high", "SSH server (sshd) on port 8080")
+
+
+def test_without_ss_the_listener_is_found_from_proc_net(monkeypatch, tmp_path):
+    plant_chain(tmp_path, ROOT_LOGIN)
+    plant_fds(tmp_path, 900, 22)
+    plant_fds(tmp_path, 5000, 3)
+    plant_proc_net(tmp_path, tcp=[row("00000000:0016", "00000000:0000", "0A", 0, "22"),      # *:22
+                                  row("00000000:1F90", "00000000:0000", "0A", 0, "3")],      # *:8080
+                   tcp6=[], udp=[], udp6=[])
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=None, ss_udp=None)
+    f = by_port(network_scan().findings)[("TCP", "8080")]
+    assert (f.severity, f.title) == ("medium", "SSH reverse tunnel (sshd) on port 8080")
+
+
+@pytest.mark.parametrize("chain", [
+    [(60, "sshd", 0, 60)],                                   # its own parent
+    [(60, "sshd", 0, 60), (61, "sshd", 0, 61), (60, "sshd", 0, 60)],   # two that are each other's
+])
+def test_a_loop_in_planted_proc_files_ends_as_a_server(monkeypatch, tmp_path, chain):
+    for i, (pid, comm, euid, sid) in enumerate(chain[:2]):
+        d = tmp_path / "proc" / str(pid)
+        d.mkdir(parents=True, exist_ok=True)
+        ppid = chain[i + 1][0] if i + 1 < len(chain) else pid
+        (d / "stat").write_text("%s (%s) S %s 4321 %s 0 -1" % (pid, comm, ppid, sid))
+        (d / "comm").write_text(comm + "\n")
+        (d / "status").write_text("Name:\t%s\nUid:\t0\t0\t0\t0\n" % comm)
+        plant_fds(tmp_path, pid, 22)
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(sshd_22(61), FWD % 60))
+    f = by_port(network_scan().findings)[("TCP", "8080")]
+    assert (f.severity, f.title) == ("high", "SSH server (sshd) on port 8080")
+
+
+def test_a_long_chain_of_ssh_servers_is_read_only_so_far(monkeypatch, tmp_path):
+    import time
+    chain = [(1000 + i, "sshd", 0, 1000 + i) for i in range(60)] + [(1, "systemd", 0, 1)]
+    plant_chain(tmp_path, chain)
+    for pid, _, _, _ in chain[1:-1]:
+        plant_fds(tmp_path, pid, 22)
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(sshd_22(1059), FWD % 1000))
+    read, real = [], listeners._stat
+    monkeypatch.setattr(listeners, "_stat", lambda pid: read.append(pid) or real(pid))
+    t0 = time.perf_counter()
+    f = by_port(network_scan().findings)[("TCP", "8080")]
+    assert time.perf_counter() - t0 < 2.0
+    assert (f.severity, f.title) == ("high", "SSH server (sshd) on port 8080")   # too far to tell: a server
+    assert 0 < read.count("1000") and len(set(read)) <= 20, sorted(set(read))
+
+
+def test_a_uid_too_long_for_int_does_not_stop_the_check(monkeypatch, tmp_path):
+    plant_chain(tmp_path, [(5555, "sshd", 1000, 5000), (5000, "sshd", 0, 5000)])
+    (tmp_path / "proc" / "5000" / "status").write_text("Name:\tsshd\nUid:\t0\t" + "9" * 5000 + "\t0\t0\n")
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=5555,fd=3)) '
+                                         'uid:1000 ino:3 sk:3 <->'))
+    f = one(network_scan().findings)
+    assert (f.severity, f.title) == ("high", "SSH server (sshd) on port 2222")
+
+
+def test_an_fd_that_closes_while_the_folder_is_read_is_skipped(monkeypatch, tmp_path):
+    monkeypatch.setattr(listeners, "PROC", tmp_path / "proc")
+    plant_fds(tmp_path, 900, 22)
+    real = os.listdir
+    # listed in this order: one that closed after the listing (9), then the listener's socket (3)
+    monkeypatch.setattr(listeners.os, "listdir", lambda p: ["0", "9", "1", "2", "3"] if p.endswith("/fd") else real(p))
+    assert no_crash(listeners._socket_inodes, "900") == ["4040", "22"]
+
+
+def test_a_long_ss_line_gives_its_inode_in_linear_time():
+    import time
+    line = ('LISTEN 0 1 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=6000,fd=3)) ino:' + "9" * 100000 + ' sk:1 '
+            + "cgroup:/x ino:1 " * 20000 + '<->')
+    t0 = time.perf_counter()
+    s = one(no_crash(listeners.parse_ss, line, "TCP"))
+    assert time.perf_counter() - t0 < 1.0   # a parser quadratic in these sizes takes minutes
+    assert (s["inode"], s["cgroup"], s["pid"]) == ("9" * 100000, "/x", "6000")
