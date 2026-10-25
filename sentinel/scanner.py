@@ -121,10 +121,12 @@ class ScanResult:
 
 
 def _run(cmd: list[str], timeout: int = 30) -> tuple[str, int]:
-    """Run a command safely, return (stdout, returncode)."""
+    """Run a command safely, return (stdout, returncode). Bytes that aren't UTF-8 are replaced, not fatal: other
+    users choose text that lands in this output (process names, cgroup folder names), and one bad byte used to stop
+    the whole check (2026-10-24)."""
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
+            cmd, capture_output=True, text=True, errors="replace", timeout=timeout,
         )
         return result.stdout.strip(), result.returncode
     except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
@@ -572,11 +574,6 @@ def _expected_ports() -> tuple:
         return set(), Finding(check="network", severity="medium", title="expected.json unreadable",
                               description=f"{path} could not be read ({type(e).__name__}), so no port is treated as expected.",
                               remediation=f"Fix or remove {path}.", details={"path": str(path)})
-
-
-def _loopback(host: str) -> bool:
-    from .listeners import loopback
-    return loopback(host)
 
 
 def check_network() -> list[Finding]:

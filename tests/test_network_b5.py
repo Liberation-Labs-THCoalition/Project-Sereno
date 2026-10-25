@@ -73,9 +73,14 @@ def test_macos_lsof_format(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("host,local", [("127.0.0.1", True), ("127.0.0.53%lo", True), ("[::1]", True),
                                         ("::ffff:127.0.0.1", True), ("0.0.0.0", False), ("*", False),
-                                        ("[::]", False), ("100.80.54.90", False), ("192.168.1.5", False)])
+                                        ("[::]", False), ("100.80.54.90", False), ("192.168.1.5", False),
+                                        # bound to the loopback device: only this machine reaches it (2026-10-24)
+                                        ("0.0.0.0%lo", True), ("fe80::1%lo0", True), ("[fe80::1]%lo", True),
+                                        ("[::]%lo", True), ("0.0.0.0%eth0", False), ("fe80::1%en0", False),
+                                        ("0.0.0.0%lo1", False)])
 def test_loopback(host, local):
-    assert scanner._loopback(host) is local
+    from sentinel.listeners import loopback
+    assert loopback(host) is local
 
 
 def test_a_failed_listing_is_not_checked_never_clean(monkeypatch, tmp_path):

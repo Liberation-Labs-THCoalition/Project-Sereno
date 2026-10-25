@@ -18,6 +18,15 @@ What changed in Sereno, in plain words. Newest first. To get the changes, run `g
     `ss`, it reads `/proc/net` directly.
   - On macOS, the system's own listeners are listed too (from `netstat`), and a connected UDP socket is no longer
     mistaken for a listening port.
+  - After review: a program can't pass itself off as root's `tailscaled` by naming a helper "uid:0" (Sereno reads
+    the owner only from the fields after the program names). Docker's published port 4000 is "Docker", not "likely
+    NoMachine": a unit the system made outranks the port. A unit a user named `cups.service` no longer calls their
+    port printing. An SSH login's forwarded port (`ssh -R`) is "SSH reverse tunnel", medium, with no advice to stop
+    an SSH server. TightVNC, Xvnc4, RealVNC's virtual desktops, xpra, Sunshine and Guacamole are named as remote
+    desktops. GNOME's VNC off a 5900 port gets the VNC command, not RDP's. A socket bound to the loopback device is
+    this machine only. Run as root, a socket with no program is no longer called "the kernel's" outright. On macOS,
+    netstat failing is "partly checked", not silence. One byte that isn't UTF-8 in a command's output no longer stops
+    the whole check.
   - Never read: a program's command line, which can hold passwords.
 - **Notes are printed.** A scan with nothing but notes said "7 notes below, for your information:" and then printed
   none of them. They're listed now. (69c4073)

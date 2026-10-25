@@ -14,15 +14,20 @@ Where the facts come from (read-only and local):
 - Tailscale: `tailscale status --json` (5 s timeout), asked only when a socket is bound to a Tailscale address. If
   tailscale isn't installed, that rule is skipped.
 
-How sure: a name from the program or its systemd unit is a fact; a name from the port alone is a guess, and the
-finding says "likely". A socket whose program Sereno can't see is reported with "owner not visible without sudo",
-never passed over. Command lines are never read, because they can hold passwords (x11vnc -passwd does).
+How sure: a name from the program, or from a systemd unit the system made, is a fact; a name from the port alone is
+a guess, and the finding says "likely". A unit a user or a container named can mark a socket as remote control (that
+only raises the alarm) but never as an ordinary service. A socket whose program Sereno can't see is reported with
+"owner not visible without sudo", never passed over. Program names are chosen by the programs, so ss's users block is
+read by its structure, and the owner's user id only from the fields after it. Command lines are never read, because
+they can hold passwords (x11vnc -passwd does); for an SSH server's program, its parent's name and user are read from
+/proc/<pid>/stat and the parent's comm and status, to tell a login's forwarded port from a server.
 
 What's reported (the reachability rules of 0060f82 stand):
 - high: remote control that other machines can reach (a remote desktop, or SSH on any port but 22), on any TCP port
   and on remote desktops' own UDP ports;
 - medium: any other TCP port other machines can reach, except 22, 80 and 443; UDP services on ports up to 1024,
-  beyond the common client ones; a protocol whose ports couldn't be listed at all ("not checked");
+  beyond the common client ones; a protocol whose ports couldn't be listed at all ("not checked"), or on macOS only
+  partly (lsof without netstat lists only your own programs);
 - info: what only this machine can reach; Tailscale's own listeners on its tailnet addresses; ports in expected.json.
 """
 from __future__ import annotations
@@ -54,10 +59,17 @@ REMOTE_PROGRAMS = {
     "vino-server": ("remote desktop", "vino", "vino"),
     "xvnc": ("remote desktop", "Xvnc", "xvnc"),
     "xtigervnc": ("remote desktop", "Xtigervnc", "xvnc"),
+    "xtightvnc": ("remote desktop", "TightVNC", "xvnc"),
+    "xvnc4": ("remote desktop", "Xvnc4", "xvnc"),
     "x0vncserver": ("remote desktop", "x0vncserver", "xvnc"),
     "wayvnc": ("remote desktop", "wayvnc", "wayvnc"),
     "vncserver-x11-core": ("remote desktop", "RealVNC", "realvnc"),
     "vncserver-x11-serviced": ("remote desktop", "RealVNC", "realvnc"),
+    "xvnc-core": ("remote desktop", "RealVNC virtual desktop", "realvnc_virtual"),
+    "vncserver-virtuald": ("remote desktop", "RealVNC virtual desktop", "realvnc_virtual"),
+    "xpra": ("remote desktop", "xpra", "xpra"),
+    "sunshine": ("remote desktop", "Sunshine", "sunshine"),
+    "guacd": ("remote desktop gateway", "Apache Guacamole", "guacd"),
     "krfb": ("remote desktop", "krfb", "krfb"),
     "rustdesk": ("remote desktop", "RustDesk", "rustdesk"),
     "anydesk": ("remote desktop", "AnyDesk", "anydesk"),
@@ -113,14 +125,14 @@ UNIT_PROGRAMS = {"ssh": "sshd", "nxserver": "nxd", "postgresql": "postgres", "do
                  "redis": "redis-server", "mysql": "mysqld", "mariadb": "mariadbd", "cups": "cupsd",
                  "vncserver": "xvnc", "tigervncserver": "xvnc"}
 
-# How to switch remote control off, each with its undo. {port}, {display} (VNC display) and {grd} (rdp or vnc) are
-# filled in.
+# How to switch remote control off, each with its undo. {port}, {display} (VNC display), {grd_off} and {grd_on}
+# (GNOME's grdctl commands for RDP, VNC or both) and {look} (the command that shows a port's program) are filled in.
 OFF = {
     "grd": "Switch it off in Settings > System > Remote Desktop (older GNOME: Settings > Sharing), or run "
-           "`grdctl {grd} disable` and "
-           "`systemctl --user disable --now gnome-remote-desktop` (undo: `grdctl {grd} enable` and "
+           "{grd_off} and "
+           "`systemctl --user disable --now gnome-remote-desktop` (undo: {grd_on} and "
            "`systemctl --user enable --now gnome-remote-desktop`). If it's the login screen's remote login (the system "
-           "service), the same with sudo: `sudo grdctl --system {grd} disable` and "
+           "service, which speaks RDP), the same with sudo: `sudo grdctl --system rdp disable` and "
            "`sudo systemctl disable --now gnome-remote-desktop`.",
     "xrdp": "Switch it off: `sudo systemctl disable --now xrdp xrdp-sesman` (undo: "
             "`sudo systemctl enable --now xrdp xrdp-sesman`).",
@@ -134,6 +146,14 @@ OFF = {
               "stop it with `pkill -x wayvnc` and remove its autostart entry.",
     "realvnc": "On Raspberry Pi OS: `sudo raspi-config`, Interface Options, VNC, No (undo: the same, Yes). Elsewhere: "
                "`sudo systemctl disable --now vncserver-x11-serviced` (undo: the same with enable).",
+    "realvnc_virtual": "Stop it with `vncserver-virtual -kill :{display}` (undo: `vncserver-virtual :{display}`); if it "
+                       "starts at boot, `sudo systemctl disable --now vncserver-virtuald` (undo: the same with enable).",
+    "xpra": "`xpra list` shows its sessions; stop one with `xpra stop :N` (undo: start it again the way you started "
+            "it), then remove what starts it (a systemd unit or an autostart entry) so it stays off.",
+    "sunshine": "Quit Sunshine and turn off its autostart, or `systemctl --user disable --now sunshine` (undo: "
+                "`systemctl --user enable --now sunshine`).",
+    "guacd": "Switch it off: `sudo systemctl disable --now guacd` (undo: `sudo systemctl enable --now guacd`). It "
+             "relays remote desktops (RDP, VNC, SSH) to Guacamole's web page, so check who can reach that too.",
     "krfb": "Quit Desktop Sharing (krfb) and turn off its autostart in its settings (undo: start krfb again).",
     "rustdesk": "Switch it off: `sudo systemctl disable --now rustdesk` (undo: `sudo systemctl enable --now rustdesk`), "
                 "or quit RustDesk if you only start it when you need it.",
@@ -151,8 +171,7 @@ OFF = {
     "vnc": "If it's GNOME's: `grdctl vnc disable` (undo: `grdctl vnc enable`). If it's TigerVNC: "
            "`vncserver -kill :{display}` (undo: `vncserver :{display}`).",
     "ssh": "SSH on port 22 isn't reported. If you moved SSH to port {port} on purpose, add {port} to expected.json. If "
-           "you didn't, a second SSH server is running: find it with `sudo ss -ltnp 'sport = :{port}'` and stop it "
-           "(undo: start it again).",
+           "you didn't, a second SSH server is running: find it with `sudo {look}` and stop it (undo: start it again).",
 }
 
 TAILSCALE_NETS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
@@ -160,8 +179,12 @@ _ADDR = re.compile(r"^(.*):(\d+)$")
 
 
 def loopback(host: str) -> bool:
-    h = host.split("%", 1)[0].strip("[]")
-    return h.startswith("127.") or h in ("::1", "localhost") or h.startswith("::ffff:127.")
+    """Only this machine can reach it: a loopback address, or any address bound to the loopback device itself
+    (ss writes 0.0.0.0%lo; macOS netstat writes fe80::1%lo0)."""
+    h, _, zone = host.partition("%")
+    h = h.strip("[]")
+    return (h.startswith("127.") or h in ("::1", "localhost") or h.startswith("::ffff:127.")
+            or zone in ("lo", "lo0"))  # ss writes [fe80::1]%lo: the zone comes after the brackets
 
 
 def _norm(host: str) -> str:
@@ -200,27 +223,66 @@ def _sock(proto, host, port, line, programs=(), pid="", uid=None, user="", cgrou
 
 # ── Linux ──
 
+_USER_END = re.compile(r'",pid=(\d+),fd=\d+\)')
+
+
+def _users_block(text: str):
+    """([(program, pid)], the text after the block) from ss's `users:(("name",pid=N,fd=N),...)`. A program chooses its
+    own name and ss prints it as it is, quotes, commas and spaces included, so a name can hold text that looks like
+    the fields around it ("uid:0", `",pid=1`). Linux cuts names to 15 characters, so an entry ends at the last
+    `",pid=N,fd=N)` that starts within 15 characters of its opening quote: one inside the name starts earlier, and
+    the next entry's starts later. A block that doesn't parse (only crafted names do that) gives None for the text
+    after it: neither what follows nor its pids can be trusted."""
+    if not text.startswith("users:(("):
+        return [], text
+    procs, i = [], len("users:(")
+    while text.startswith('("', i):
+        start, end = i + 2, None
+        for k in range(16):
+            end = _USER_END.match(text, start + k) or end
+        if end is None:
+            return procs, None
+        procs.append((text[start:end.start()], end.group(1)))
+        i = end.end()
+        if not text.startswith(",(", i):
+            break
+        i += 1
+    return (procs, text[i + 1:]) if text.startswith(")", i) else (procs, None)
+
+
+def _details(text: str):
+    """(uid, cgroup) from the fields ss -e prints after the users block, in this order: uid:N (left out when it's 0),
+    ino:N, sk:X, then fwmark: and cgroup: when set. They're read from the left, so a cgroup folder's name, which a
+    user may choose, can't pose as an earlier field. Without ino: (an old ss, or no -e) the owner is unknown."""
+    toks = text.split()
+    uid = int(toks[0][4:]) if toks and re.match(r"uid:\d+$", toks[0]) else None
+    rest = toks[1:] if uid is not None else toks
+    if not (rest and re.match(r"ino:\d+$", rest[0])):
+        return None, ""
+    cgroup = next((t[len("cgroup:"):] for t in rest[1:] if t.startswith("cgroup:")), "")
+    return (0 if uid is None else uid), cgroup
+
+
 def parse_ss(output: str, proto: str) -> list:
     """Sockets from `ss -tlnp -e` or `ss -ulnp -e` output. ss -e prints uid: only when it isn't 0, so a line with ino:
     and no uid: is root's; a line with neither (an old ss, or no -e) has no known owner."""
     socks = []
     for line in output.splitlines():  # a header line has no host:port in the address column, so it's skipped below
-        f = line.split()
+        cols = list(re.finditer(r"\S+", line))
+        f = [c.group() for c in cols]
         if not f:
             continue
-        p = proto
+        p, first = proto, 0
         if f[0].lower() in ("tcp", "udp"):  # ss prints the protocol first when asked for both
-            p, f = f[0].upper(), f[1:]
-        m = _ADDR.match(f[3]) if len(f) > 3 else None
+            p, first = f[0].upper(), 1
+        m = _ADDR.match(f[first + 3]) if len(f) > first + 3 else None
         if not m:
             continue
-        procs = re.findall(r'\("([^"]*)",pid=(\d+)', line)
-        uid = re.search(r"\buid:(\d+)", line)
-        cgroup = re.search(r"\bcgroup:(\S+)", line)
+        # After the address columns: the users block (programs Sereno may see), then the -e fields
+        procs, rest = _users_block(line[cols[first + 4].end():].lstrip() if len(f) > first + 4 else "")
+        uid, cgroup = _details(rest or "")
         socks.append(_sock(p, m.group(1), m.group(2), line.strip(), [n for n, _ in procs],
-                           procs[0][1] if procs else "",
-                           int(uid.group(1)) if uid else (0 if re.search(r"\bino:\d+", line) else None),
-                           cgroup=cgroup.group(1) if cgroup else ""))
+                           procs[0][1] if procs and rest is not None else "", uid, cgroup=cgroup))
     return socks
 
 
@@ -269,11 +331,15 @@ def proc_sockets(proto: str):
 def _inode_owners(inodes: set) -> dict:
     """socket inode -> (pid, program name), for the processes whose fd folder Sereno may read."""
     owners = {}
+    if not inodes:
+        return owners
     try:
         pids = sorted((p for p in os.listdir(str(PROC)) if p.isdigit()), key=int)  # a shared socket: the parent
     except OSError:
         return owners
     for pid in pids:
+        if len(owners) == len(inodes):
+            break  # every socket has its owner: the rest of /proc needn't be read
         try:
             fds = os.listdir(str(PROC / pid / "fd"))
         except OSError:
@@ -304,7 +370,7 @@ def _gather_linux(run):
     socks, unchecked = [], []
     for proto, flag in (("TCP", "-tlnp"), ("UDP", "-ulnp")):
         output, rc = run(["ss", flag, "-e"])
-        if rc == 0:
+        if rc == 0 and output.strip():  # ss always prints its header, so empty output isn't a listing
             socks += parse_ss(output, proto)
             continue
         found = proc_sockets(proto)
@@ -315,7 +381,7 @@ def _gather_linux(run):
     for s in socks:
         if s["pid"]:
             s["exe"] = _linux_exe(s["pid"])
-    return socks, unchecked
+    return socks, unchecked, []  # ss and /proc/net both list every socket, so Linux has no partial listing
 
 
 # ── macOS ──
@@ -363,13 +429,15 @@ def parse_netstat(output: str, proto: str) -> list:
 
 
 def _gather_macos(run):
-    socks, unchecked = [], []
+    """(sockets, protocols not checked, protocols only partly checked: lsof listed them but netstat, which lists
+    other users' and the system's sockets, didn't work)."""
+    socks, unchecked, partial = [], [], []
     for proto, lsof_args, family in (("TCP", ["-iTCP", "-sTCP:LISTEN"], "tcp"), ("UDP", ["-iUDP"], "udp")):
         output, rc = run(["lsof", "+c", "0", "-nP"] + lsof_args)
         seen = parse_lsof(output, proto)  # lsof exits 1 when it has nothing to list, so rc only says "not checked"
         stat, src = run(["netstat", "-an", "-p", family])
-        if rc != 0 and src != 0:
-            unchecked.append(proto)
+        if src != 0:
+            (partial if rc == 0 else unchecked).append(proto)
         keys = {(_norm(s["host"]), s["port"]) for s in seen}
         hidden = [s for s in parse_netstat(stat, proto) if (_norm(s["host"]), s["port"]) not in keys] if src == 0 else []
         socks += seen + hidden
@@ -379,7 +447,7 @@ def _gather_macos(run):
         exes = dict(line.strip().split(None, 1) for line in output.splitlines() if len(line.split(None, 1)) == 2)
         for s in socks:
             s["exe"] = exes.get(s["pid"], "")
-    return socks, unchecked
+    return socks, unchecked, partial
 
 
 # ── Tailscale ──
@@ -427,9 +495,44 @@ def _names(s) -> list:
     return s["programs"] + ([os.path.basename(exe)] if exe else [])
 
 
-def _unit_names(s) -> list:
-    base = re.split(r"[@.]", _unit(s["cgroup"]), 1)[0]
-    return [UNIT_PROGRAMS.get(base, base)] if base else []
+def _system_unit(cgroup: str) -> str:
+    """The unit, when the system's service manager made it: /system.slice/NAME, or NAME in a slice there
+    (/system.slice/system-postgresql.slice/postgresql@16-main.service). Only root makes those. A unit under /user.slice
+    is named by that user, and one inside a container (/system.slice/docker-ID.scope/...) by whoever runs it."""
+    parts = cgroup.strip("/").split("/")
+    if len(parts) >= 2 and parts[0] == "system.slice" and all(p.endswith(".slice") for p in parts[1:-1]):
+        return _unit(cgroup)
+    return ""
+
+
+def _unit_names(s, system_only: bool = False) -> list:
+    """The program a socket's systemd unit names. A socket another user holds inside the SSH server's unit isn't the
+    server's (its listener is root's): it's whatever that user started from a login."""
+    unit = _system_unit(s["cgroup"]) if system_only else _unit(s["cgroup"])
+    base = re.split(r"[@.]", unit, maxsplit=1)[0]
+    name = UNIT_PROGRAMS.get(base, base)
+    return [name] if base and not (name == "sshd" and s["uid"] != 0) else []
+
+
+def _parent(pid: str):
+    """(program, user id) of a process's parent, from /proc/<pid>/stat and the parent's comm and status (never a
+    command line); None when they can't be read (macOS has no /proc)."""
+    try:
+        ppid = (PROC / pid / "stat").read_text().rsplit(")", 1)[1].split()[1]  # the name, in (), may hold ")"
+        comm = (PROC / ppid / "comm").read_text().strip()
+        uid = re.search(r"^Uid:\s+\d+\s+(\d+)", (PROC / ppid / "status").read_text(), re.M)
+        return comm, int(uid.group(1))  # the effective user id
+    except (OSError, IndexError, AttributeError):
+        return None
+
+
+def _ssh_login(s, server) -> bool:
+    """An SSH server's program on a socket that belongs to a login, not to the server: its parent is that same
+    server running as root. The server forks a process per login, and before OpenSSH 9.8 that process is still called
+    sshd; it holds the ports the login forwards with `ssh -R`. A server someone started has a shell, systemd or a
+    launcher for a parent, so it stays an SSH server, as it does when the parent can't be read."""
+    parent = _parent(s["pid"]) if s["pid"] else None
+    return parent is not None and parent[1] == 0 and _lookup(REMOTE_PROGRAMS, [parent[0]]) == server
 
 
 def _remote_port(proto: str, port: str):
@@ -443,7 +546,8 @@ def _tailscale_reason(s, ts_ips, ts_api):
     """How a socket is known to be Tailscale's own, or "" when it isn't."""
     if (_norm(s["host"]), s["port"]) in ts_api and _norm(s["host"]) in ts_ips:
         return "tailscale status"
-    if s["uid"] == 0 and _lookup({"tailscaled": 1}, s["programs"]):
+    # Without root, Sereno sees only your own programs, so a root-owned "tailscaled" it can see isn't the real one
+    if s["uid"] == 0 and _euid() == 0 and _lookup({"tailscaled": 1}, s["programs"]):
         return "program"
     if s["uid"] == 0 and s["cgroup"] == "/system.slice/tailscaled.service":
         return "unit"
@@ -458,25 +562,33 @@ def _unseen(s) -> bool:
 def identify(members, proto, port, ts_ips, ts_api) -> dict:
     """What the sockets on one port are: kind ("remote", "tailscale", "service" or ""), label, how it was told
     ("program", "unit", "port", "tailscale status") and, for remote control, how to switch it off. A visible program
-    is the best witness; a systemd unit or the port speak only for sockets whose program isn't visible."""
+    is the best witness; a systemd unit or the port speak only for sockets whose program isn't visible, and a unit
+    the system made outranks the port. A name that makes a socket remote control may come from any unit (it only
+    raises the alarm); a name that calls it an ordinary service comes only from a unit the system made."""
     unseen = [s for s in members if _unseen(s)]
     for how, names, among in (("program", _names, members), ("unit", _unit_names, unseen)):
         for s in among:
             hit = _lookup(REMOTE_PROGRAMS, names(s))
-            if hit:
+            if hit and not (how == "program" and hit[2] == "ssh" and _ssh_login(s, hit)):
                 return {"kind": "remote", "label": "%s (%s)" % hit[:2], "how": how, "off": hit[2]}
     reasons = [_tailscale_reason(s, ts_ips, ts_api) for s in members]
     if all(reasons):
         label = "Tailscale peer API (tailscaled)" if reasons[0] == "tailscale status" else "Tailscale (tailscaled)"
         return {"kind": "tailscale", "label": label, "how": reasons[0], "off": ""}
     hit = _remote_port(proto, port)
-    if unseen and hit:
+    if hit and any(not _lookup(SERVICE_PROGRAMS, _unit_names(s, system_only=True)) for s in unseen):
         return {"kind": "remote", "label": "%s (%s)" % hit[:2], "how": "port", "off": hit[2]}
-    for how, names, among in (("program", _names, members), ("unit", _unit_names, unseen)):
-        for s in among:
-            label = _lookup(SERVICE_PROGRAMS, names(s))
-            if label:
-                return {"kind": "service", "label": label, "how": how, "off": ""}
+    for s in members:
+        ssh = _lookup(REMOTE_PROGRAMS, _names(s))
+        label = _lookup(SERVICE_PROGRAMS, _names(s)) or (
+            "SSH reverse tunnel (%s)" % ssh[1] if ssh and ssh[2] == "ssh" else "")  # an SSH login's (see above)
+        if label:
+            return {"kind": "service", "label": label, "how": "program", "off": "",
+                    "tunnel": label.startswith("SSH reverse tunnel")}
+    for s in unseen:
+        label = _lookup(SERVICE_PROGRAMS, _unit_names(s, system_only=True))
+        if label:
+            return {"kind": "service", "label": label, "how": "unit", "off": ""}
     label = SERVICE_PORTS.get((proto, port))
     if unseen and label:
         return {"kind": "service", "label": label, "how": "port", "off": ""}
@@ -502,30 +614,45 @@ def _user(uid) -> str:
         return "uid %s" % uid
 
 
+def _witness(members):
+    """The socket that speaks for its port in the details and the "Program:" sentence: one whose program is known,
+    else one a launcher holds, else the first."""
+    return min(members, key=lambda s: (not s["programs"], _unseen(s)))
+
+
 def _who(members, euid) -> tuple:
-    """(a sentence on who owns the sockets, visible?)."""
+    """(a sentence on who owns the sockets, visible?). Visible means the program behind every socket is known; a
+    launcher's socket doesn't count, since the launcher only starts that program when a connection comes."""
     seen = [s for s in members if s["programs"]]
     hidden = [s for s in members if not s["programs"]]
+    held = [s for s in seen if _unseen(s)]
     parts = []
     if seen:
-        s = seen[0]
+        s = _witness(seen)
         progs = ", ".join(dict.fromkeys(p for x in seen for p in x["programs"]))
         extra = ", ".join(x for x in ("pid " + s["pid"] if s["pid"] else "", s["exe"]) if x)
         user = s["user"] or (_user(s["uid"]) if s["uid"] is not None else "")
         parts.append("Program: %s%s%s." % (progs, " (%s)" % extra if extra else "", ", user " + user if user else ""))
+    if held:
+        parts.append("%s holds %s for a service it starts when a connection comes, so the program behind it isn't "
+                     "known." % (held[0]["programs"][0], "it" if len(held) == len(members) else "one socket"))
     if hidden:
         s = hidden[0]
+        unit = _unit(s["cgroup"])
         facts = [x for x in ("user " + (s["user"] or _user(s["uid"])) if s["uid"] is not None or s["user"] else "",
-                             "systemd unit " + _unit(s["cgroup"]) if _unit(s["cgroup"]) else "") if x]
+                             ("systemd unit " if _system_unit(s["cgroup"]) else "a systemd unit its owner named ")
+                             + unit if unit else "") if x]
         known = " The system shows it belongs to %s." % " and ".join(facts) if facts else ""
         if euid == 0:
-            parts.append("No program holds %s: it's the kernel's (WireGuard and NFS work this way).%s"
+            # Root sees every program on the machine, but not from inside a container or a user namespace
+            parts.append("No program Sereno can see holds %s, even running as root: it may be the kernel's (WireGuard "
+                         "and NFS work this way), or a program outside the container or namespace Sereno runs in.%s"
                          % ("one socket on this port" if seen else "it", known))
         else:
             parts.append("%s: owner not visible without sudo.%s"
                          % ("Another socket on this port" if seen else "Sereno can't see which program this is",
                             known))
-    return " ".join(parts), not hidden
+    return " ".join(parts), not hidden and not held
 
 
 def _how(ident, members, proto, port) -> str:
@@ -542,17 +669,46 @@ def _how(ident, members, proto, port) -> str:
     hit = _remote_port(proto, port)
     hint = SERVICE_PORTS.get((proto, port)) or ("%s (%s)" % hit[:2] if hit else "")
     said = {"program": "Named by its program.", "unit": "Named by its systemd unit."}.get(how, "")
+    if ident.get("tunnel"):
+        said += (" An SSH login's own process (the SSH server forks one for each login) holds the ports that login "
+                 "forwards with `ssh -R`.")
     if hint and hint.lower() not in ident["label"].lower():  # "DNS resolver (systemd-resolved)" needn't add "DNS"
         said += " Port %s is the usual port for %s." % (port, hint)
     return said.strip()
 
 
-def _remediation(ident, port, local, macos, visible, expected, root) -> str:
+def _find(ident, port, macos, members, root) -> str:
+    """The step that shows which program holds the port, when Sereno couldn't tell."""
+    if ident["how"] in ("program", "unit") or not any(_unseen(s) for s in members):
+        return ""
+    if all(s["programs"] for s in members):  # only a launcher holds what isn't known: sudo shows no more
+        s = next(s for s in members if _unseen(s))
+        if s["programs"][0] == "systemd":
+            return "To see which service it starts: `systemctl %slist-sockets --all`. " % (
+                "" if s["uid"] == 0 else "--user ")
+        return "To see which service it starts, look for port %s in %s's settings. " % (port, s["programs"][0])
+    look = "lsof -nP -i :%s" % port if macos else "ss -ltnup 'sport = :%s'" % port
+    if root:  # sudo adds nothing for real root, but Sereno may have run as root inside a container or namespace
+        return "If Sereno ran inside a container or a user namespace, run `sudo %s` on the host to see the program. " % look
+    return "To see which program it is: `sudo %s`. " % look
+
+
+def _grd(port: str) -> dict:
+    """GNOME Remote Desktop's commands for this port: VNC on 5900-5999, RDP on 3389-3390, both when the port doesn't
+    say which."""
+    p = int(port)
+    modes = ["vnc"] if 5900 <= p <= 5999 else ["rdp"] if p in (3389, 3390) else ["rdp", "vnc"]
+    if len(modes) == 1:
+        return {"grd_off": "`grdctl %s disable`" % modes[0], "grd_on": "`grdctl %s enable`" % modes[0]}
+    return {"grd_off": "`grdctl rdp disable`, `grdctl vnc disable` (port %s doesn't say which of the two it serves)"
+                       % port,
+            "grd_on": "`grdctl rdp enable` or `grdctl vnc enable`, whichever it was,"}
+
+
+def _remediation(ident, port, local, macos, members, expected, root) -> str:
     if expected:
         return ""
-    # Running as root already shows every program: a socket still without one is the kernel's, and sudo can't add more
-    find = ("" if visible or root or ident["how"] in ("program", "unit") else "To see which program it is: `sudo %s`. "
-            % ("lsof -nP -i :%s" % port if macos else "ss -ltnup 'sport = :%s'" % port))
+    find = _find(ident, port, macos, members, root)
     if ident["kind"] == "tailscale":
         if local or ident.get("tailnet_only"):
             return "Nothing to do: Tailscale runs this, and your tailnet's access rules decide which devices reach it."
@@ -562,13 +718,15 @@ def _remediation(ident, port, local, macos, visible, expected, root) -> str:
     if ident["kind"] == "remote":
         key = "macos_sharing" if macos and ident["off"] == "vnc" else ident["off"]
         display = int(port) - 5900 if 5900 <= int(port) <= 5999 else "N"
-        off = OFF[key].format(port=port, display=display, grd="vnc" if 5900 <= int(port) <= 5910 else "rdp")
+        look = "lsof -nP -i :%s" % port if macos else "ss -ltnp 'sport = :%s'" % port
+        off = OFF[key].format(port=port, display=display, look=look, **_grd(port))
         tail = "" if key == "ssh" else " If you use it on purpose, add %s to expected.json: it stays listed, as info." % port
         return (find + ("Only this machine can reach it (an SSH tunnel is the usual way in). If you didn't set that "
                         "up: " if local else "") + off + tail)
     if ident["kind"] == "service" and ident["how"] != "port":
-        return ("If you know %s and run it on purpose, add %s to expected.json. If you don't recognize it, investigate."
-                % (ident["label"], port))
+        return (("It closes when the SSH login that opened it ends (`who` lists the logins). " if ident.get("tunnel")
+                 else "") + "If you know %s and run it on purpose, add %s to expected.json. If you don't recognize it, "
+                "investigate." % (ident["label"], port))
     return (find + "Check what's using port %s. If you don't recognize it, investigate. If you run it on purpose, "
                    "add %s to expected.json." % (port, port))
 
@@ -586,7 +744,7 @@ def _euid() -> int:
 def check_listeners(make, run, macos: bool, expected: set) -> list:
     """Findings for every listening port; `make(severity, title, description, remediation, details)`."""
     euid = _euid()
-    socks, unchecked = (_gather_macos if macos else _gather_linux)(run)
+    socks, unchecked, partial = (_gather_macos if macos else _gather_linux)(run)
     out = []
     for proto in unchecked:
         tools = "lsof and netstat" if macos else "ss and /proc/net"
@@ -596,6 +754,13 @@ def check_listeners(make, run, macos: bool, expected: set) -> list:
                         "Make sure %s is available (on Linux, ss comes in the iproute2 package), then scan again."
                         % ("netstat" if macos else "ss"),
                         {"proto": proto, "not_checked": True}))
+    for proto in partial if euid != 0 else ():  # as root, lsof lists every program's sockets
+        out.append(make("medium", "Listening ports partly checked (%s)" % proto,
+                        "netstat didn't work, so Sereno listed only the %s ports of your own programs (from lsof): "
+                        "other users' and the system's own weren't checked." % proto,
+                        "Make sure netstat is available, or run Sereno with sudo so lsof lists every program's "
+                        "ports, then scan again.",
+                        {"proto": proto, "not_checked": True, "partial": True}))
     ts_ips, ts_api = set(), set()
     if any(_tailscale_range(s["host"]) for s in socks):
         ts_ips, ts_api = tailnet(run, macos)
@@ -631,19 +796,18 @@ def check_listeners(make, run, macos: bool, expected: set) -> list:
         where = ("this machine only" if local else
                  "machines on your Tailscale network" if tailnet_only else "other machines")
         who, visible = _who(members, euid)
+        shown = _witness(members)  # the details describe one socket: its program, pid, user and unit belong together
         expected_note = " Port %s is listed in expected.json." % port if is_expected else ""
         description = " ".join(x for x in (
             "Something is listening on %s port %s, reachable from %s (bound to %s)." % (proto, port, where,
                                                                                       ", ".join(hosts)),
             who, _how(ident, members, proto, port), expected_note.strip(),
-            "Line: %s" % _clip(members[0]["line"])) if x)
-        first = members[0]
-        shown = next((s for s in members if s["programs"]), first)
+            "Line: %s" % _clip(shown["line"])) if x)
         out.append(make(severity, title, description,
-                        _remediation(ident, port, local, macos, visible, is_expected, euid == 0),
-                        {"port": port, "proto": proto, "host": first["host"], "hosts": hosts, "line": first["line"],
+                        _remediation(ident, port, local, macos, members, is_expected, euid == 0),
+                        {"port": port, "proto": proto, "host": shown["host"], "hosts": hosts, "line": shown["line"],
                          "loopback": local, "expected": is_expected, "service": ident["label"],
                          "identified_by": ident["how"], "programs": shown["programs"], "pid": shown["pid"],
-                         "exe": shown["exe"], "uid": first["uid"], "unit": _unit(first["cgroup"]),
+                         "exe": shown["exe"], "uid": shown["uid"], "unit": _unit(shown["cgroup"]),
                          "owner_visible": visible}))
     return out

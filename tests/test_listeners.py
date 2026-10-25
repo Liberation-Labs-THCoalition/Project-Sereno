@@ -236,7 +236,8 @@ def test_macos_not_checked_when_lsof_and_netstat_both_fail(monkeypatch, tmp_path
         netstat_tcp=("", 1))
     findings = check_network()
     assert [(f.severity, f.title) for f in findings] == [
-        ("medium", "Listening ports not checked (UDP)"), ("medium", "Unexpected listening port: 7000")]
+        ("medium", "Listening ports not checked (UDP)"), ("medium", "Listening ports partly checked (TCP)"),
+        ("medium", "Unexpected listening port: 7000")]
     assert "lsof and netstat didn't work" in findings[0].description
     assert "Make sure netstat is available" in findings[0].remediation
 
@@ -386,7 +387,7 @@ def test_service_naming_and_port_hints(monkeypatch, tmp_path):
         'LISTEN 0 1 0.0.0.0:6379 0.0.0.0:* users:(("python3",pid=74,fd=3)) uid:1000 ino:9 sk:9 <->',
         'LISTEN 0 1 127.0.0.1:631 0.0.0.0:* ino:7 sk:7 cgroup:/system.slice/cups.service <->',
         'LISTEN 0 1 127.0.0.53%lo:53 0.0.0.0:* uid:991 ino:8 sk:8 cgroup:/system.slice/systemd-resolved.service <->'))
-    found = by_port(check_network())
+    found = by_port(no_crash(check_network))   # visible programs Sereno can't name (9999) mustn't stop the check
     dns = found[("TCP", "53")]
     assert dns.title == "DNS resolver (systemd-resolved) on port 53 (this machine only)"
     assert "usual port" not in dns.description
@@ -585,12 +586,19 @@ def test_who_owns_what(monkeypatch, tmp_path):
     assert f.details["owner_visible"] is False and f.details["programs"] == ["node"]
     env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(*lines))
     f = one(check_network())
-    assert "No program holds one socket on this port: it's the kernel's" in f.description
+    assert "No program Sereno can see holds one socket on this port, even running as root: it may be the kernel's" \
+        in f.description
     env(monkeypatch, tmp_path, euid=0, ss_tcp=ss('LISTEN 0 1 0.0.0.0:7002 0.0.0.0:* ino:2 sk:2 <->'))
     f = one(check_network())
-    assert "No program holds it: it's the kernel's (WireGuard and NFS work this way). The system shows it belongs " \
-           "to user root." in f.description
-    assert f.remediation.startswith("Check what's using port 7002.")   # as root, sudo shows nothing more
+    # Root sees every program, but not from inside a container or a user namespace: no flat "it's the kernel's"
+    assert ("No program Sereno can see holds it, even running as root: it may be the kernel's (WireGuard and NFS work "
+            "this way), or a program outside the container or namespace Sereno runs in. The system shows it belongs "
+            "to user root.") in f.description
+    assert "it's the kernel's" not in f.description
+    assert f.remediation.startswith("If Sereno ran inside a container or a user namespace, run "
+                                    "`sudo ss -ltnup 'sport = :7002'` on the host to see the program. Check what's "
+                                    "using port 7002.")
+    assert f.details["owner_visible"] is False
     env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 1 0.0.0.0:7003 0.0.0.0:*'))
     f = one(check_network())
     assert f.description.split(" Line:")[0].endswith("Sereno can't see which program this is: owner not visible "
@@ -719,11 +727,17 @@ def test_netstat_reads_only_its_own_protocol_and_real_addresses():
 def test_macos_names_with_spaces_and_root_tailscaled(monkeypatch, tmp_path):
     lsof_tcp = "\n".join([LSOF_HDR, "Google\\x20Chrome 900 m 30u IPv4 0x9 0t0 TCP 127.0.0.1:9222 (LISTEN)",
                           "tailscaled 77 root 5u IPv4 0x7 0t0 TCP 100.80.54.90:41000 (LISTEN)"])
-    env(monkeypatch, tmp_path, mac=True, lsof_tcp=lsof_tcp, lsof_udp=("", 1), netstat_tcp="", netstat_udp="")
+    env(monkeypatch, tmp_path, mac=True, euid=0, lsof_tcp=lsof_tcp, lsof_udp=("", 1), netstat_tcp="",
+        netstat_udp="")
     found = by_port(check_network())
     assert found[("TCP", "9222")].details["programs"] == ["Google Chrome"]
     ts = found[("TCP", "41000")]
     assert (ts.severity, ts.title, ts.details["uid"]) == ("info", "Tailscale (tailscaled) on port 41000", 0)
+    # Without root, lsof lists only your own programs: a root "tailscaled" it shows can't be the real one
+    env(monkeypatch, tmp_path, mac=True, lsof_tcp=lsof_tcp, lsof_udp=("", 1), netstat_tcp="", netstat_udp="")
+    ts = by_port(check_network())[("TCP", "41000")]
+    assert (ts.severity, ts.title) == ("medium", "Tailscale (tailscaled) on port 41000")
+    assert "running as root" not in ts.description
 
 
 def test_a_remote_desktop_named_by_its_unit(monkeypatch, tmp_path):
@@ -738,8 +752,9 @@ def test_only_the_machines_own_tailscaled_unit_counts(monkeypatch, tmp_path):
     env(monkeypatch, tmp_path, ss_tcp=ss(
         'LISTEN 0 1 100.80.54.90:41000 0.0.0.0:* ino:1 sk:1 '
         'cgroup:/system.slice/docker-1.scope/system.slice/tailscaled.service <->'))
-    f = one(check_network())   # a container's tailscaled is still named, but isn't the machine's own: not info
-    assert (f.severity, f.title) == ("medium", "Tailscale (tailscaled) on port 41000")
+    f = one(check_network())   # a container's unit is named by whoever runs it: shown, but it names nothing
+    assert (f.severity, f.title) == ("medium", "Unexpected listening port: 41000")
+    assert "a systemd unit its owner named tailscaled.service" in f.description
     assert "running as root" not in f.description
 
 
@@ -749,3 +764,301 @@ def test_a_port_is_tailscales_only_if_every_socket_on_it_is(monkeypatch, tmp_pat
     f = one(check_network())
     assert (f.severity, f.title) == ("medium", "Unexpected listening port: 56893")
     assert "reachable from other machines" in f.description
+
+
+# ── Review fixes, 2026-10-24: each test fails on an assertion without its fix ──
+
+TS_ONLY_PEER = json.dumps({"Self": {"TailscaleIPs": ["100.80.54.90"], "PeerAPIURL": ["http://100.80.54.90:56893"]}})
+
+
+@pytest.mark.parametrize("users", [
+    '(("uid:0",pid=11,fd=3),("tailscaled",pid=12,fd=3))',     # a helper named "uid:0" shares the socket
+    '(("tailscaled",pid=12,fd=3),("x uid:0 ",pid=11,fd=3))',   # a name with spaces makes "uid:0" its own word
+    '(("ino:1 sk:1 ",pid=11,fd=3),("tailscaled",pid=12,fd=3))',
+])
+def test_a_program_name_cannot_pose_as_the_sockets_owner(monkeypatch, tmp_path, users):
+    line = ('LISTEN 0 128 100.80.54.90:47123 0.0.0.0:* users:%s uid:1000 ino:34931130 sk:1 '
+            'cgroup:/user.slice/user-1000.slice/session-2.scope <->' % users)
+    s = one(listeners.parse_ss(line, "TCP"))
+    assert s["uid"] == 1000 and s["cgroup"] == "/user.slice/user-1000.slice/session-2.scope"
+    # Even run as root, where every program shows, the listener stays the user's, not root's tailscaled
+    env(monkeypatch, tmp_path, euid=0, tailscale=TS_ONLY_PEER, ss_tcp=ss(line))
+    f = one(check_network())
+    assert f.severity == "medium" and f.details["uid"] == 1000
+    assert "user root" not in f.description and "Nothing to do" not in f.remediation
+
+
+def test_the_users_block_is_read_by_its_structure():
+    rows = listeners.parse_ss("\n".join([
+        # a name holding a fake pid: the real one is the last that ends within 15 characters
+        'LISTEN 0 1 127.0.0.1:47124 0.0.0.0:* users:(("a",pid=1,x",pid=1176229,fd=3)) uid:1000 ino:2 sk:2 <->',
+        # a 15-character name, `",pid=1,fd=2)),`, made of a fake entry and a fake end of the block
+        'LISTEN 0 1 127.0.0.1:47125 0.0.0.0:* users:(("",pid=1,fd=2)),",pid=77,fd=3)) uid:1000 ino:3 sk:3 <->',
+        # a cgroup folder (users may name their own) holding fake fields comes after the real ones
+        'LISTEN 0 1 0.0.0.0:47126 0.0.0.0:* uid:1000 ino:4 sk:4 fwmark:0x1 cgroup:/user.slice/x uid:0 <->',
+        # root's socket (no uid:) with the netid column first
+        'tcp LISTEN 0 1 0.0.0.0:47127 0.0.0.0:* users:(("nginx",pid=20,fd=6),("nginx",pid=19,fd=6)) ino:5 sk:5 <->',
+        # no -e fields after the block: owner unknown
+        'LISTEN 0 1 0.0.0.0:47128 0.0.0.0:* users:(("srv",pid=30,fd=3))',
+        # an empty name, then a name that starts like an entry's end: 16 characters on, it isn't the first's end
+        'LISTEN 0 1 0.0.0.0:47130 0.0.0.0:* users:(("",pid=9,fd=3),("",pid=5,fd=5),(",pid=7,fd=4)) uid:1000 ino:6 '
+        'sk:6 <->',
+        # a cgroup folder named to hold a second cgroup: field
+        'LISTEN 0 1 0.0.0.0:47131 0.0.0.0:* uid:1000 ino:7 sk:7 cgroup:/user.slice/x cgroup:/system.slice/a.service <->',
+    ]), "TCP")
+    assert [(r["port"], r["programs"], r["pid"], r["uid"], r["cgroup"]) for r in rows] == [
+        ("47124", ['a",pid=1,x'], "1176229", 1000, ""),
+        ("47125", ['",pid=1,fd=2)),'], "77", 1000, ""),
+        ("47126", [], "", 1000, "/user.slice/x"),
+        ("47127", ["nginx", "nginx"], "20", 0, ""),
+        ("47128", ["srv"], "30", None, ""),
+        ("47130", ["", '",pid=5,fd=5),('], "9", 1000, ""),
+        ("47131", [], "", 1000, "/user.slice/x")]
+
+
+@pytest.mark.parametrize("users", [
+    '(("x",pid=5,fd=3)',                      # never closed
+    '(("x",pid=5,fd=3)("y",pid=6,fd=4))',     # entries not separated
+    '(("a name far longer than fifteen",pid=5,fd=3))',
+    '(("x",pid=5,fd=3),("a name far longer than fifteen",pid=6,fd=4))',
+])
+def test_a_users_block_that_does_not_parse_trusts_nothing_after_it(users):
+    line = 'LISTEN 0 1 0.0.0.0:47129 0.0.0.0:* users:%s ino:9 sk:9 cgroup:/system.slice/tailscaled.service <->' % users
+    s = one(no_crash(listeners.parse_ss, line, "TCP"))
+    assert (s["uid"], s["cgroup"], s["pid"]) == (None, "", "")
+
+
+def test_a_known_system_unit_outranks_the_port_guess(monkeypatch, tmp_path):
+    docker = 'LISTEN 0 4096 0.0.0.0:4000 0.0.0.0:* ino:20581 sk:1 cgroup:/system.slice/docker.service <->'
+    env(monkeypatch, tmp_path, ss_tcp=ss(docker))
+    f = one(check_network())
+    assert (f.severity, f.title, f.details["identified_by"]) == ("medium", "Docker on port 4000", "unit")
+    assert "Port 4000 is the usual port for remote desktop (NoMachine)." in f.description
+    assert "nxserver" not in f.remediation
+    # Another hidden socket on the port that no known unit explains: the port speaks for that one
+    env(monkeypatch, tmp_path, ss_tcp=ss(docker, 'LISTEN 0 5 [::]:4000 [::]:* ino:7 sk:7 <->'))
+    assert one(check_network()).title == "Likely remote desktop (NoMachine) on port 4000"
+    # A unit a user named docker.service doesn't explain it either
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 5 0.0.0.0:4000 0.0.0.0:* uid:1001 ino:8 sk:8 '
+                                         'cgroup:/user.slice/user-1001.slice/user@1001.service/app.slice/docker.service <->'))
+    assert one(check_network()).severity == "high"
+
+
+def plant_parent(tmp_path, pid, ppid, parent_comm, parent_uid, name="sshd"):
+    for p, text in ((pid, "%s (%s) S %s 1 1 0 -1" % (pid, name, ppid)), (ppid, None)):
+        d = tmp_path / "proc" / str(p)
+        d.mkdir(parents=True, exist_ok=True)
+        if text:
+            (d / "stat").write_text(text)
+    (tmp_path / "proc" / str(ppid) / "comm").write_text(parent_comm + "\n")
+    (tmp_path / "proc" / str(ppid) / "status").write_text(
+        "Name:\t%s\nPid:\t%s\nUid:\t%d\t%d\t%d\t%d\n" % (parent_comm, ppid, parent_uid, parent_uid, parent_uid,
+                                                       parent_uid))
+
+
+def test_an_sshd_login_holding_a_forwarded_port_is_a_tunnel_not_a_server(monkeypatch, tmp_path):
+    plant_parent(tmp_path, 5555, 5000, "sshd", 0)      # forked by the SSH server, running as root
+    env(monkeypatch, tmp_path, ss_tcp=ss(
+        'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("sshd",pid=5555,fd=9)) uid:1000 ino:3 sk:3 '
+        'cgroup:/user.slice/user-1000.slice/session-7.scope <->',
+        'LISTEN 0 128 127.0.0.1:9000 0.0.0.0:* users:(("sshd",pid=5555,fd=10)) uid:1000 ino:4 sk:4 <->'))
+    found = by_port(check_network())
+    tunnel = found[("TCP", "8080")]
+    assert (tunnel.severity, tunnel.title) == ("medium", "SSH reverse tunnel (sshd) on port 8080")
+    assert "holds the ports that login forwards with `ssh -R`" in tunnel.description
+    assert tunnel.remediation.startswith("It closes when the SSH login that opened it ends")
+    assert "a second SSH server" not in tunnel.remediation
+    assert found[("TCP", "9000")].title == "SSH reverse tunnel (sshd) on port 9000 (this machine only)"
+
+
+@pytest.mark.parametrize("parent_comm,parent_uid", [("bash", 1000), ("sshd", 1000), ("systemd", 0)])
+def test_an_sshd_someone_started_stays_an_ssh_server(monkeypatch, tmp_path, parent_comm, parent_uid):
+    plant_parent(tmp_path, 5555, 5000, parent_comm, parent_uid)
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=5555,fd=3)) '
+                                         'uid:1000 ino:3 sk:3 <->'))
+    f = one(check_network())
+    assert (f.severity, f.title) == ("high", "SSH server (sshd) on port 2222")
+
+
+def test_a_parent_is_read_from_stat_even_with_a_bracket_in_the_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(listeners, "PROC", tmp_path / "proc")
+    plant_parent(tmp_path, 60, 50, "sshd", 0, name="a) b")
+    assert listeners._parent("60") == ("sshd", 0)
+    assert listeners._parent("61") is None             # gone, or not readable
+
+
+def test_another_users_socket_in_the_ssh_unit_is_not_the_ssh_server(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 5 0.0.0.0:8000 0.0.0.0:* uid:1001 ino:4 sk:4 '
+                                         'cgroup:/system.slice/ssh.service <->'))
+    f = one(check_network())
+    assert (f.severity, f.title) == ("medium", "Unexpected listening port: 8000")
+    assert "systemd unit ssh.service" in f.description
+
+
+@pytest.mark.parametrize("port,has,lacks", [
+    ("5911", ["`grdctl vnc disable`", "undo: `grdctl vnc enable`"], ["`grdctl rdp disable`"]),
+    ("3390", ["`grdctl rdp disable`"], ["`grdctl vnc disable`"]),
+    ("5900", ["`grdctl vnc disable`"], ["`grdctl rdp disable`"]),
+    ("5999", ["`grdctl vnc disable`"], ["`grdctl rdp disable`"]),
+    ("7000", ["`grdctl rdp disable`, `grdctl vnc disable` (port 7000 doesn't say which of the two it serves)",
+              "`grdctl rdp enable` or `grdctl vnc enable`, whichever it was,"], []),
+])
+def test_gnome_remote_desktop_off_switch_follows_the_port(monkeypatch, tmp_path, port, has, lacks):
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 5 0.0.0.0:%s 0.0.0.0:* users:(("gnome-remote-de",pid=5,fd=3)) '
+                                         'uid:1000 ino:5 sk:5 <->' % port))
+    f = one(check_network())
+    assert all(x in f.remediation for x in has), f.remediation
+    assert not any(x in f.remediation for x in lacks), f.remediation
+    assert "`sudo grdctl --system rdp disable`" in f.remediation   # the login screen's remote login speaks RDP
+
+
+def test_macos_says_when_only_your_own_ports_were_listed(monkeypatch, tmp_path):
+    lsof_tcp = "\n".join([LSOF_HDR, "x 1 m 3u IPv4 0x1 0t0 TCP *:7000 (LISTEN)"])
+    env(monkeypatch, tmp_path, mac=True, lsof_tcp=lsof_tcp, lsof_udp=("", 1), netstat_tcp=("", 1), netstat_udp="")
+    findings = check_network()
+    partial = [f for f in findings if f.details.get("partial")]
+    assert [(f.severity, f.title) for f in partial] == [("medium", "Listening ports partly checked (TCP)")]
+    assert "only the TCP ports of your own programs" in partial[0].description
+    assert partial[0].details["not_checked"] is True
+    env(monkeypatch, tmp_path, mac=True, euid=0, lsof_tcp=lsof_tcp, lsof_udp=("", 1), netstat_tcp=("", 1),
+        netstat_udp="")
+    assert not [f for f in check_network() if f.details.get("not_checked")]   # as root, lsof lists them all
+
+
+def test_a_socket_bound_to_the_loopback_device_is_this_machine_only(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 5 0.0.0.0%lo:8000 0.0.0.0:* users:(("python3",pid=5,fd=3)) '
+                                         'uid:1000 ino:5 sk:5 <->'))
+    f = one(check_network())
+    assert (f.severity, f.title) == ("info", "Unexpected listening port: 8000 (this machine only)")
+
+
+@pytest.mark.parametrize("uid,launcher,step", [
+    ("uid:1000 ", "systemd", "To see which service it starts: `systemctl --user list-sockets --all`. "),
+    ("", "systemd", "To see which service it starts: `systemctl list-sockets --all`. "),
+    ("", "inetd", "To see which service it starts, look for port 7100 in inetd's settings. "),
+])
+def test_a_launchers_socket_is_not_a_known_owner(monkeypatch, tmp_path, uid, launcher, step):
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 5 0.0.0.0:7100 0.0.0.0:* users:(("%s",pid=1500,fd=40)) %sino:7 '
+                                         'sk:7 <->' % (launcher, uid)))
+    f = one(check_network())
+    assert f.details["owner_visible"] is False
+    assert "%s holds it for a service it starts when a connection comes" % launcher in f.description
+    assert f.remediation.startswith(step + "Check what's using port 7100.")
+    assert "sudo ss" not in f.remediation
+
+
+def test_the_details_describe_one_socket(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, ss_tcp=ss(
+        'LISTEN 0 5 0.0.0.0:7200 0.0.0.0:* ino:8 sk:8 cgroup:/system.slice/mystery.service <->',
+        'LISTEN 0 5 [::]:7200 [::]:* users:(("python3",pid=77,fd=3)) uid:1000 ino:9 sk:9 <->'))
+    f = one(check_network())
+    d = f.details
+    assert (d["programs"], d["pid"], d["uid"], d["unit"], d["host"]) == (["python3"], "77", 1000, "", "[::]")
+    assert "python3" in d["line"] and "python3" in f.description.split("Line: ")[1]
+
+
+def test_proc_owners_stop_when_every_socket_is_found(monkeypatch, tmp_path):
+    plant_proc(tmp_path, 300, comm="a", fds={3: "socket:[555]"})
+    plant_proc(tmp_path, 400, comm="b", fds={3: "socket:[556]"})
+    monkeypatch.setattr(listeners, "PROC", tmp_path / "proc")
+    real, listed = os.listdir, []
+    monkeypatch.setattr(listeners.os, "listdir", lambda p: listed.append(p) or real(p))
+    assert listeners._inode_owners(set()) == {} and listed == []
+    assert listeners._inode_owners({"555"}) == {"555": ("300", "a")}
+    assert str(tmp_path / "proc" / "400" / "fd") not in listed
+
+
+@pytest.mark.parametrize("program,port,label,off", [
+    ("Xtightvnc", "5901", "Remote desktop (TightVNC)", "`vncserver -kill :1`"),
+    ("Xvnc4", "5902", "Remote desktop (Xvnc4)", "`vncserver -kill :2`"),
+    ("Xvnc-core", "5903", "Remote desktop (RealVNC virtual desktop)", "`vncserver-virtual -kill :3`"),
+    ("vncserver-virtu", "5904", "Remote desktop (RealVNC virtual desktop)", "vncserver-virtuald"),
+    ("xpra", "14500", "Remote desktop (xpra)", "`xpra stop :N`"),
+    ("sunshine", "47989", "Remote desktop (Sunshine)", "`systemctl --user disable --now sunshine`"),
+    ("guacd", "4822", "Remote desktop gateway (Apache Guacamole)", "`sudo systemctl disable --now guacd`"),
+])
+def test_more_remote_desktops_by_program(monkeypatch, tmp_path, program, port, label, off):
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 5 0.0.0.0:%s 0.0.0.0:* users:(("%s",pid=5,fd=3)) uid:1000 ino:10 '
+                                         'sk:10 <->' % (port, program)))
+    f = one(check_network())
+    assert (f.severity, f.title) == ("high", "%s on port %s" % (label, port))
+    assert off in f.remediation
+
+
+def test_a_unit_a_user_named_does_not_name_a_service(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 5 0.0.0.0:7777 0.0.0.0:* uid:33 ino:11 sk:11 '
+                                         'cgroup:/user.slice/user-33.slice/user@33.service/app.slice/cups.service <->'))
+    f = one(check_network())
+    assert (f.severity, f.title) == ("medium", "Unexpected listening port: 7777")
+    assert "belongs to user www-data and a systemd unit its owner named cups.service." in f.description
+    assert "printing" not in f.remediation
+    # A name that raises the alarm may still come from such a unit
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 5 0.0.0.0:7778 0.0.0.0:* uid:33 ino:12 sk:12 '
+                                         'cgroup:/user.slice/user-33.slice/user@33.service/app.slice/xrdp.service <->'))
+    assert (one(check_network()).severity, one(check_network()).title) == ("high", "Remote desktop (xrdp) on port 7778")
+
+
+@pytest.mark.parametrize("cgroup,unit", [
+    ("/system.slice/cups.service", "cups.service"),
+    ("/system.slice/system-postgresql.slice/postgresql@16-main.service", "postgresql@16-main.service"),
+    ("/system.slice/docker-1.scope/system.slice/tailscaled.service", ""),
+    ("/user.slice/user-33.slice/user@33.service/app.slice/cups.service", ""),
+    ("/system.slice", ""), ("", ""), ("/machine.slice/x.service", ""),
+])
+def test_system_units(cgroup, unit):
+    assert listeners._system_unit(cgroup) == unit
+
+
+def test_macos_lsof_and_netstat_agree_on_ipv6_loopback(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, mac=True,
+        lsof_tcp="\n".join([LSOF_HDR, "cupsd 9 m 5u IPv6 0x9 0t0 TCP [::1]:631 (LISTEN)"]), lsof_udp=("", 1),
+        netstat_tcp="\n".join([NETSTAT_HDR, "tcp6 0 0 ::1.631 *.* LISTEN"]), netstat_udp="")
+    f = one(check_network())
+    assert f.details["owner_visible"] is True and "Another socket" not in f.description
+
+
+def test_an_empty_ss_listing_falls_back_to_proc(monkeypatch, tmp_path):
+    plant_proc_net(tmp_path, tcp=[row("00000000:1E61", "00000000:0000", "0A", 0, "556")], tcp6=[], udp=[], udp6=[])
+    env(monkeypatch, tmp_path, ss_tcp="", ss_udp="")
+    f = one(check_network())
+    assert f.title == "Unexpected listening port: 7777"
+
+
+def test_output_that_is_not_utf8_does_not_stop_the_check():
+    import sys
+    try:
+        out, rc = scanner._run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'cgroup:/x\\xffy')"])
+    except UnicodeDecodeError as e:
+        pytest.fail("a byte that isn't UTF-8 stopped the command: %r" % e)
+    assert (out, rc) == ("cgroup:/x�y", 0)
+
+
+def test_the_ssh_off_switch_uses_the_systems_own_tool(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, mac=True, lsof_tcp="\n".join([LSOF_HDR, "dropbear 7 m 3u IPv4 0x1 0t0 TCP *:2222 (LISTEN)"]),
+        lsof_udp=("", 1), netstat_tcp="", netstat_udp="")
+    f = one(check_network())
+    assert "`sudo lsof -nP -i :2222`" in f.remediation and "ss -ltnp" not in f.remediation
+
+
+def test_a_port_shared_by_a_launcher_and_its_program_is_told_by_the_program(monkeypatch, tmp_path):
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss(
+        'LISTEN 0 1 [::]:3389 [::]:* users:(("systemd",pid=1,fd=50)) ino:8 sk:8 cgroup:/system.slice/xrdp.socket <->',
+        'LISTEN 0 1 0.0.0.0:3389 0.0.0.0:* users:(("xrdp",pid=7,fd=11)) uid:115 ino:12 sk:7 <->'))
+    f = one(check_network())
+    assert (f.details["pid"], f.details["programs"], f.details["uid"]) == ("7", ["xrdp"], 115)
+    assert "Program: systemd, xrdp (pid 7), user " in f.description
+    assert "systemd holds one socket for a service it starts" in f.description
+
+
+def test_only_an_ssh_servers_child_is_a_login(monkeypatch, tmp_path):
+    plant_parent(tmp_path, 60, 50, "xrdp", 0, name="xrdp")   # xrdp forks per session too: still remote desktop
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 1 0.0.0.0:3390 0.0.0.0:* users:(("xrdp",pid=60,fd=3)) uid:115 '
+                                         'ino:3 sk:3 <->'))
+    assert (one(check_network()).severity, one(check_network()).title) == ("high", "Remote desktop (xrdp) on port 3390")
+
+
+def test_the_parents_effective_user_decides_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(listeners, "PROC", tmp_path / "proc")
+    plant_parent(tmp_path, 60, 50, "sshd", 0)
+    (tmp_path / "proc" / "50" / "status").write_text("Name:\tsshd\nUid:\t1000\t0\t0\t0\n")   # real 1000, effective 0
+    assert listeners._parent("60") == ("sshd", 0)
