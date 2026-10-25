@@ -34,6 +34,28 @@ What changed in Sereno, in plain words. Newest first. To get the changes, run `g
   - Never read: a program's command line, which can hold passwords.
 - **Notes are printed.** A scan with nothing but notes said "7 notes below, for your information:" and then printed
   none of them. They're listed now. (69c4073)
+- **New check: AI agent safety (`agent_safety`).** Sereno now reports AI coding agents set to skip their own
+  safety prompts: Claude Code's bypass mode, its warning before bypass mode turned off, every project MCP server
+  approved, or every shell command allowed (including a rule for a program that runs whatever it's given, such as
+  `Bash(python3:*)`); Codex set to never ask with no sandbox; VS Code's global auto-approve; Gemini CLI letting every
+  shell command through; and shell aliases, functions and fish abbreviations that start `claude`, `codex` or
+  `gemini` with their skip flags, also through programs that start another (`sudo -Hu bob`, `timeout`, `npx`,
+  `op run --`, `mise exec --`, `uv tool run`, `watch`, `su -c`, `tmux new` and more) or `$(which codex)`, and with a
+  redirection written against a flag (`--yolo>log`). Each shell line is read in one pass, so a file built to slow the
+  scan down can't. In your own settings that's advice (medium), with how to turn the prompt back on;
+  in a project folder's Claude Code settings it's high. It also reports agent logins left exposed: a login file
+  other accounts can read (`chmod 600` fixes it), and an agent API key or token written into a shell startup file,
+  fish's universal variables or your Claude Code settings, by name and line, never the value.
+- **Fixes in the same checks.** A package.json nested too deep to parse no longer stops the npm check; and when git
+  refuses to read a repository (one owned by another account), the MCP check says it couldn't ask git instead of
+  calling the file untracked.
+- **MCP check: a scanned folder's git settings can't run a program.** To learn whether a config holding a secret is
+  in git, Sereno asks git, and git used to run the fsmonitor command named in that folder's own `.git/config`, so a
+  downloaded folder could make a read-only scan run a program. Sereno now switches that command and git hooks off
+  for the question, as Claude Code does.
+- **A settings file nested too deep to parse no longer stops a check.** A JSON file in a project folder nested
+  deeper than Python can parse used to stop the persistence, MCP and agent checks, losing their other findings. It's
+  now reported as not checked, like any file Sereno can't read.
 
 ## 2026-10-23
 

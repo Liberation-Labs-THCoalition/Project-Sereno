@@ -213,7 +213,7 @@ NPM_COMPROMISED_STEPS = (
 def _npm_version(pkg: Path) -> str:
     try:
         return str(json.loads((pkg / "package.json").read_text()).get("version", "unknown"))
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):   # RecursionError: JSON nested too deep to parse
         return "unknown"
 
 
@@ -714,10 +714,22 @@ def check_mcp() -> list[Finding]:
     return check_mcp_servers(make, _home(), load_known_bad_npm(), load_known_bad_pip())
 
 
+# ── Check: AI agent safety (sentinel/agent_safety.py) ──
+
+def check_agents() -> list[Finding]:
+    """AI coding agents set to skip their own safety prompts, and agent logins left exposed."""
+    from .agent_safety import check_agent_safety
+
+    def make(severity, title, description, remediation, details):
+        return Finding(check="agent_safety", severity=severity, title=title, description=description,
+                       remediation=remediation, details=details)
+    return check_agent_safety(make, _home())
+
+
 # ── Main Scanner ──
 
 CHECK_NAMES = ("npm_supply_chain", "pip_supply_chain", "persistence", "processes", "network", "credentials",
-               "git_repos", "mcp_servers")
+               "git_repos", "mcp_servers", "agent_safety")
 
 class SentinelScanner:
     """The main scanner orchestrator."""
@@ -751,6 +763,7 @@ class SentinelScanner:
             "credentials": check_credentials,
             "git_repos": check_git_repos,
             "mcp_servers": check_mcp,
+            "agent_safety": check_agents,
         }
 
         for check_name in self._checks:

@@ -97,6 +97,17 @@ class TestNpmSupplyChain:
         assert findings[0].title == "Compromised package: @corp/lib@2.0.1"
         assert "Disconnect" in findings[0].remediation
 
+    def test_a_package_json_nested_too_deep_is_an_unreadable_version(self, tmp_path, monkeypatch):
+        # Python's parser gives up on it with RecursionError, which used to stop the whole check
+        pkg = self._install(tmp_path, "leftpad2")
+        (pkg / "package.json").write_text("[" * 100000)
+        monkeypatch.setattr("sentinel.scanner._home", lambda: tmp_path)
+        monkeypatch.setattr("sentinel.scanner.load_known_bad_npm",
+                            lambda: {"scopes": [], "packages": {"leftpad2": ["0.3.0"]}})
+        result = SentinelScanner(checks=["npm_supply_chain"]).scan()
+        assert [(f.severity, f.title) for f in result.findings] == [
+            ("medium", "Listed package with an unreadable version: leftpad2")]
+
     def test_exact_unscoped_version_is_critical(self, tmp_path, monkeypatch):
         self._install(tmp_path, "leftpad2", "0.3.0")
         findings = self._scan(tmp_path, monkeypatch, {"scopes": [], "packages": {"leftpad2": ["0.1.0", "0.3.0"]}})
