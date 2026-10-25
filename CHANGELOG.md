@@ -8,7 +8,7 @@ What changed in Sereno, in plain words. Newest first. To get the changes, run `g
   program's file where Sereno can see them, and known services are named: "remote desktop (gnome-remote-desktop) on
   port 3390" instead of "unexpected listening port 3390". Each finding says how it knew: by the program, by its systemd
   unit, or by the port alone ("likely ..."). A port whose program can't be seen without sudo says so, and is still
-  reported. (151d520, 7ba1698, 09d8dd1, 66ec1b7, 8ff2256)
+  reported. (151d520, 7ba1698, 09d8dd1, 66ec1b7, 8ff2256, f6df868)
   - Remote control that other machines can reach (a remote desktop such as RDP, VNC, NoMachine, RustDesk, AnyDesk or
     TeamViewer, or SSH on a port other than 22) is now high on any TCP port, with the command that switches it off
     and the one that undoes it. SSH on port 22 isn't reported, as before.
