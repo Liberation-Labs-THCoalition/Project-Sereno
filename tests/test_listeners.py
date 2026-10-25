@@ -1062,3 +1062,172 @@ def test_the_parents_effective_user_decides_root(tmp_path, monkeypatch):
     plant_parent(tmp_path, 60, 50, "sshd", 0)
     (tmp_path / "proc" / "50" / "status").write_text("Name:\tsshd\nUid:\t1000\t0\t0\t0\n")   # real 1000, effective 0
     assert listeners._parent("60") == ("sshd", 0)
+
+
+# ── Verify round 1 (2026-10-25) ──
+
+def network_scan():
+    """The network check as a scan runs it: a crash comes back as "Check couldn't run", which fails here as an
+    assertion, not an error."""
+    result = scanner.SentinelScanner(checks=["network"]).scan()
+    crashed = [f.description for f in result.findings if f.title.startswith("Check couldn't run")]
+    assert not crashed, crashed
+    return result
+
+
+def test_a_parent_name_that_is_not_utf8_does_not_stop_the_check(monkeypatch, tmp_path):
+    plant_parent(tmp_path, 5555, 5000, "x", 1000)
+    (tmp_path / "proc" / "5000" / "comm").write_bytes(b"\xff\xfeparent\n")   # a name set with prctl, any bytes
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=5555,fd=3)) '
+                                         'uid:1000 ino:3 sk:3 <->'))
+    f = one(network_scan().findings)
+    assert (f.severity, f.title) == ("high", "SSH server (sshd) on port 2222")
+    assert listeners._parent("5555") == ("��parent", 1000)
+
+
+def test_a_process_whose_own_name_is_not_utf8_but_whose_binary_is_sshd(monkeypatch, tmp_path):
+    plant_parent(tmp_path, 5555, 5000, "bash", 1000)
+    (tmp_path / "proc" / "5555" / "stat").write_bytes(b"5555 (\xff) S 5000 1 1 0 -1")
+    os.symlink("/usr/sbin/sshd", str(tmp_path / "proc" / "5555" / "exe"))
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("�",pid=5555,fd=3)) '
+                                         'uid:1000 ino:3 sk:3 <->'))
+    f = one(network_scan().findings)
+    assert (f.severity, f.title) == ("high", "SSH server (sshd) on port 2222")
+
+
+def test_proc_owner_names_that_are_not_utf8_do_not_stop_the_fallback(monkeypatch, tmp_path):
+    plant_proc_net(tmp_path, tcp=[row("00000000:1E61", "00000000:0000", "0A", 1000, "556")], tcp6=[], udp=[], udp6=[])
+    plant_proc(tmp_path, 300, fds={3: "socket:[556]"})
+    (tmp_path / "proc" / "300" / "comm").write_bytes(b"\xffx\n")
+    env(monkeypatch, tmp_path, ss_tcp=None, ss_udp=None)
+    f = one(network_scan().findings)
+    assert (f.details["programs"], f.details["pid"]) == (["�x"], "300")
+
+
+def test_a_binary_path_that_is_not_utf8_can_be_printed(monkeypatch, tmp_path):
+    plant_proc(tmp_path, 4242)
+    os.symlink(b"/opt/r\xffd/rustdesk", os.fsencode(str(tmp_path / "proc" / "4242" / "exe")))
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 5 0.0.0.0:21118 0.0.0.0:* users:(("rustdesk",pid=4242,fd=3)) '
+                                         'uid:1000 ino:5 sk:5 <->'))
+    result = network_scan()
+    f = one(result.findings)
+    assert f.details["exe"] == "/opt/r�d/rustdesk"
+    assert "/opt/r�d/rustdesk" in f.description
+    try:
+        result.human_report().encode("utf-8")
+    except UnicodeEncodeError as e:
+        pytest.fail("the report can't be printed: %r" % e)
+
+
+def plant_chain(tmp_path, chain):
+    """A process and its ancestors, each (pid, program, effective user id, session id); each one's parent is the
+    next, and the last one's is 0 (none). The process group, the field before the session, is planted as 4321 so a
+    reader of the wrong field is caught."""
+    for i, (pid, comm, euid, sid) in enumerate(chain):
+        ppid = chain[i + 1][0] if i + 1 < len(chain) else 0
+        d = tmp_path / "proc" / str(pid)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "stat").write_text("%s (%s) S %s 4321 %s 0 -1" % (pid, comm, ppid, sid))
+        (d / "comm").write_text(comm + "\n")
+        (d / "status").write_text("Name:\t%s\nUid:\t%d\t%d\t%d\t%d\n" % (comm, euid, euid, euid, euid))
+
+
+# OpenSSH 9.6p1: the listening server (900, under systemd) forks a per-connection process (5000) that leads its own
+# session (sshd.c:2109). For a login as another user, that process forks the login's own process (5555, same session;
+# sshd.c:551); for a root login it serves the login itself (sshd.c:541). A login's command gets a new session
+# (session.c:462).
+LISTENER = [(900, "sshd", 0, 900), (1, "systemd", 0, 1)]
+ROOT_LOGIN = [(5000, "sshd", 0, 5000)] + LISTENER
+
+
+def test_a_root_logins_forwarded_port_is_a_tunnel(monkeypatch, tmp_path):
+    plant_chain(tmp_path, ROOT_LOGIN)
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss('LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("sshd",pid=5000,fd=9)) '
+                                                 'ino:3 sk:3 cgroup:/user.slice/user-0.slice/session-9.scope <->'))
+    f = one(network_scan().findings)
+    assert (f.severity, f.title) == ("medium", "SSH reverse tunnel (sshd) on port 8080")
+
+
+@pytest.mark.parametrize("uid,euid", [("", 0), ("uid:1000 ", 1000)])   # `sshd -D`, or `setpriv --reuid 1000 sshd -D`
+def test_an_ssh_server_a_root_login_started_is_a_server(monkeypatch, tmp_path, uid, euid):
+    plant_chain(tmp_path, [(6000, "sshd", euid, 6000)] + ROOT_LOGIN)
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss('LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=6000,fd=3)) '
+                                                 '%sino:3 sk:3 cgroup:/user.slice/user-0.slice/session-9.scope <->'
+                                                 % uid))
+    f = one(network_scan().findings)
+    assert (f.severity, f.title) == ("high", "SSH server (sshd) on port 2222")
+    assert "a second SSH server is running" in f.remediation
+    assert "It closes when the SSH login" not in f.remediation
+
+
+def test_a_users_login_process_is_a_tunnel_in_its_parents_session(monkeypatch, tmp_path):
+    plant_chain(tmp_path, [(5555, "sshd", 1000, 5000)] + ROOT_LOGIN)
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("sshd",pid=5555,fd=9)) '
+                                         'uid:1000 ino:3 sk:3 <->'))
+    assert one(network_scan().findings).title == "SSH reverse tunnel (sshd) on port 8080"
+
+
+@pytest.mark.parametrize("chain,gone", [
+    ([(50, "sshd", 0, 50), (1, "sshd", 0, 1)], None),   # sshd is a container's pid 1: its parent, 0, isn't there
+    (ROOT_LOGIN, 900),                                   # the listening server's stat is gone (it just exited)
+])
+def test_a_root_logins_process_with_no_grandparent_to_read_is_a_tunnel(monkeypatch, tmp_path, chain, gone):
+    plant_chain(tmp_path, chain)
+    if gone:
+        (tmp_path / "proc" / str(gone) / "stat").unlink()
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss('LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("sshd",pid=%s,fd=9)) '
+                                                 'ino:3 sk:3 <->' % chain[0][0]))
+    assert one(network_scan().findings).title == "SSH reverse tunnel (sshd) on port 8080"
+
+
+def test_long_proc_files_parse_in_linear_time(tmp_path, monkeypatch):
+    import time
+    monkeypatch.setattr(listeners, "PROC", tmp_path / "proc")
+    plant_chain(tmp_path, [(60, "sshd", 1000, 50), (50, "sshd", 0, 50)])
+    (tmp_path / "proc" / "60" / "stat").write_bytes(b"60 (" + b") \xff" * 60000 + b") S 50 50 50 0 -1")
+    (tmp_path / "proc" / "50" / "status").write_bytes(      # lines that start like Uid: and never finish it
+        b"Name:\t\xff\n" + b"Uid:" + b"\t" * 120000 + b"x\n" + (b"Uid:\t1" + b"\t" * 2000 + b"x\n") * 60
+        + b"Uid:\t0\t0\t0\t0\n")
+    t0 = time.perf_counter()
+    assert listeners._stat("60") == ("50", "50")
+    assert listeners._parent("60") == ("sshd", 0)
+    assert time.perf_counter() - t0 < 1.0   # 0.06 s on Asdf; a parser quadratic in these sizes takes minutes
+
+
+@pytest.mark.parametrize("names,step", [
+    ({1000: "alice"}, "To see which service it starts, run `systemctl --user list-sockets --all` as alice (as root: "
+                      "`systemctl --user -M alice@ list-sockets --all`). "),
+    ({}, "To see which service it starts, run `systemctl --user list-sockets --all` as uid 1000. "),
+])
+def test_as_root_a_users_launcher_step_names_that_user(monkeypatch, tmp_path, names, step):
+    monkeypatch.setattr(listeners, "_user", lambda uid: names.get(uid, "uid %s" % uid))
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss('LISTEN 0 5 0.0.0.0:7100 0.0.0.0:* users:(("systemd",pid=1500,fd=40)) '
+                                                 'uid:1000 ino:7 sk:7 <->'))
+    assert one(check_network()).remediation.startswith(step + "Check what's using port 7100.")
+
+
+@pytest.mark.parametrize("fields,step", [
+    ("ino:7 sk:7 ", "To see which service it starts: `systemctl list-sockets --all`. "),   # root's own: the system's
+    ("", "To see which service it starts: `systemctl --user list-sockets --all`. "),       # no owner known (old ss)
+])
+def test_as_root_the_systems_launcher_and_an_unknown_owner(monkeypatch, tmp_path, fields, step):
+    env(monkeypatch, tmp_path, euid=0, ss_tcp=ss('LISTEN 0 5 0.0.0.0:7100 0.0.0.0:* users:(("systemd",pid=1,fd=40)) '
+                                                 '%s<->' % fields))
+    assert one(check_network()).remediation.startswith(step + "Check what's using port 7100.")
+
+
+@pytest.mark.parametrize("stat,status", [
+    ("5555", None),                          # no name in ()
+    ("5555 (sshd) S 5000", None),            # cut short before the session
+    (None, "Name:\tsshd\nPid:\t5000\n"),     # the parent's status has no Uid line
+])
+def test_proc_files_that_make_no_sense_leave_an_ssh_server(monkeypatch, tmp_path, stat, status):
+    plant_chain(tmp_path, [(5555, "sshd", 1000, 5000), (5000, "sshd", 0, 5000)])
+    if stat is not None:
+        (tmp_path / "proc" / "5555" / "stat").write_text(stat)
+    if status is not None:
+        (tmp_path / "proc" / "5000" / "status").write_text(status)
+    env(monkeypatch, tmp_path, ss_tcp=ss('LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=5555,fd=3)) '
+                                         'uid:1000 ino:3 sk:3 <->'))
+    f = one(network_scan().findings)
+    assert (f.severity, f.title) == ("high", "SSH server (sshd) on port 2222")

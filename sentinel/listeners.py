@@ -19,8 +19,9 @@ a guess, and the finding says "likely". A unit a user or a container named can m
 only raises the alarm) but never as an ordinary service. A socket whose program Sereno can't see is reported with
 "owner not visible without sudo", never passed over. Program names are chosen by the programs, so ss's users block is
 read by its structure, and the owner's user id only from the fields after it. Command lines are never read, because
-they can hold passwords (x11vnc -passwd does); for an SSH server's program, its parent's name and user are read from
-/proc/<pid>/stat and the parent's comm and status, to tell a login's forwarded port from a server.
+they can hold passwords (x11vnc -passwd does); for an SSH server's program, its session and its parent's and
+grandparent's names and users are read from /proc/<pid>/stat, comm and status, to tell a login's forwarded port from a
+server. Names read from /proc may hold any bytes; one that isn't UTF-8 is replaced, never fatal.
 
 What's reported (the reachability rules of 0060f82 stand):
 - high: remote control that other machines can reach (a remote desktop, or SSH on any port but 22), on any TCP port
@@ -328,6 +329,12 @@ def proc_sockets(proto: str):
     return socks
 
 
+def _proc_text(path) -> str:
+    """A /proc file as text. A process names itself, with any bytes it likes, so a byte that isn't UTF-8 is replaced:
+    one such name used to stop the whole network check (2026-10-25)."""
+    return path.read_bytes().decode("utf-8", "replace")
+
+
 def _inode_owners(inodes: set) -> dict:
     """socket inode -> (pid, program name), for the processes whose fd folder Sereno may read."""
     owners = {}
@@ -352,7 +359,7 @@ def _inode_owners(inodes: set) -> dict:
             m = re.match(r"socket:\[(\d+)\]", target)  # a file's link is an absolute path, never this
             if m and m.group(1) in inodes and m.group(1) not in owners:
                 try:
-                    comm = (PROC / pid / "comm").read_text().strip()
+                    comm = _proc_text(PROC / pid / "comm").strip()
                 except OSError:
                     comm = "?"
                 owners[m.group(1)] = (pid, comm)
@@ -360,8 +367,10 @@ def _inode_owners(inodes: set) -> dict:
 
 
 def _linux_exe(pid: str) -> str:
+    """The binary's path. Whoever runs a program picks its folder's name, so a byte that isn't UTF-8 is replaced: kept
+    as Python's stand-in, it stopped the printed report (2026-10-25)."""
     try:
-        return os.readlink(str(PROC / pid / "exe"))
+        return os.readlink(os.fsencode(str(PROC / pid / "exe"))).decode("utf-8", "replace")
     except OSError:
         return ""
 
@@ -514,25 +523,51 @@ def _unit_names(s, system_only: bool = False) -> list:
     return [name] if base and not (name == "sshd" and s["uid"] != 0) else []
 
 
-def _parent(pid: str):
-    """(program, user id) of a process's parent, from /proc/<pid>/stat and the parent's comm and status (never a
-    command line); None when they can't be read (macOS has no /proc)."""
+def _stat(pid: str):
+    """(parent's pid, session id) from /proc/<pid>/stat, read after its last ")" since the name before it, in (), may
+    hold ")"; None when it can't be read (macOS has no /proc)."""
     try:
-        ppid = (PROC / pid / "stat").read_text().rsplit(")", 1)[1].split()[1]  # the name, in (), may hold ")"
-        comm = (PROC / ppid / "comm").read_text().strip()
-        uid = re.search(r"^Uid:\s+\d+\s+(\d+)", (PROC / ppid / "status").read_text(), re.M)
-        return comm, int(uid.group(1))  # the effective user id
-    except (OSError, IndexError, AttributeError):
+        f = _proc_text(PROC / pid / "stat").rsplit(")", 1)[1].split()
+        return f[1], f[3]
+    except (OSError, IndexError):
         return None
 
 
+def _program(pid: str):
+    """(program, effective user id) of a process, from /proc/<pid>/comm and status (never a command line); None when
+    they can't be read."""
+    try:
+        comm = _proc_text(PROC / pid / "comm").strip()
+        uid = re.search(r"^Uid:\s+\d+\s+(\d+)", _proc_text(PROC / pid / "status"), re.M)
+        return comm, int(uid.group(1))
+    except (OSError, AttributeError):
+        return None
+
+
+def _parent(pid: str):
+    """(program, effective user id) of a process's parent; None when they can't be read."""
+    stat = _stat(pid)
+    return _program(stat[0]) if stat else None
+
+
 def _ssh_login(s, server) -> bool:
-    """An SSH server's program on a socket that belongs to a login, not to the server: its parent is that same
-    server running as root. The server forks a process per login, and before OpenSSH 9.8 that process is still called
-    sshd; it holds the ports the login forwards with `ssh -R`. A server someone started has a shell, systemd or a
-    launcher for a parent, so it stays an SSH server, as it does when the parent can't be read."""
-    parent = _parent(s["pid"]) if s["pid"] else None
-    return parent is not None and parent[1] == 0 and _lookup(REMOTE_PROGRAMS, [parent[0]]) == server
+    """An SSH server's program on a socket that belongs to a login, not to a server: before OpenSSH 9.8 the process
+    serving a login is still called sshd, and it holds the ports the login forwards with `ssh -R`. Its parent is the
+    same server running as root. For a login as any user but root it's the child the server's per-connection process
+    forks, in that process's session (sshd.c, privsep_postauth); for a root login there's no child, so it's the
+    per-connection process itself, which leads a session of its own and whose parent is the listening server. A program
+    a login starts leads a session of its own too (sshd starts every login's command in a new one, session.c), but its
+    grandparent is the server: that's a second SSH server (`ssh root@host sshd -D -p 2222`). A server someone started
+    has a shell, systemd or a launcher for a parent, so it stays an SSH server, as it does when the parent can't be
+    read."""
+    stat = _stat(s["pid"]) if s["pid"] else None
+    parent = _program(stat[0]) if stat else None
+    if parent is None or parent[1] != 0 or _lookup(REMOTE_PROGRAMS, [parent[0]]) != server:
+        return False
+    if stat[1] != s["pid"]:
+        return True  # not a session leader: a login's own process
+    grand = _parent(stat[0])  # None when there's none to read (sshd as a container's first process) or it just left
+    return grand is None or _lookup(REMOTE_PROGRAMS, [grand[0]]) != server
 
 
 def _remote_port(proto: str, port: str):
@@ -684,8 +719,14 @@ def _find(ident, port, macos, members, root) -> str:
     if all(s["programs"] for s in members):  # only a launcher holds what isn't known: sudo shows no more
         s = next(s for s in members if _unseen(s))
         if s["programs"][0] == "systemd":
-            return "To see which service it starts: `systemctl %slist-sockets --all`. " % (
-                "" if s["uid"] == 0 else "--user ")
+            if s["uid"] == 0:
+                return "To see which service it starts: `systemctl list-sockets --all`. "
+            if not (root and s["uid"] is not None):
+                return "To see which service it starts: `systemctl --user list-sockets --all`. "
+            # A user's own service manager: as root, `systemctl --user` would ask root's own, not this user's
+            user = _user(s["uid"])
+            return "To see which service it starts, run `systemctl --user list-sockets --all` as %s%s. " % (
+                user, "" if user.startswith("uid ") else " (as root: `systemctl --user -M %s@ list-sockets --all`)" % user)
         return "To see which service it starts, look for port %s in %s's settings. " % (port, s["programs"][0])
     look = "lsof -nP -i :%s" % port if macos else "ss -ltnup 'sport = :%s'" % port
     if root:  # sudo adds nothing for real root, but Sereno may have run as root inside a container or namespace

@@ -8,7 +8,7 @@ What changed in Sereno, in plain words. Newest first. To get the changes, run `g
   program's file where Sereno can see them, and known services are named: "remote desktop (gnome-remote-desktop) on
   port 3390" instead of "unexpected listening port 3390". Each finding says how it knew: by the program, by its systemd
   unit, or by the port alone ("likely ..."). A port whose program can't be seen without sudo says so, and is still
-  reported. (151d520, 7ba1698, 09d8dd1)
+  reported. (151d520, 7ba1698, 09d8dd1, 66ec1b7)
   - Remote control that other machines can reach (a remote desktop such as RDP, VNC, NoMachine, RustDesk, AnyDesk or
     TeamViewer, or SSH on a port other than 22) is now high on any TCP port, with the command that switches it off
     and the one that undoes it. SSH on port 22 isn't reported, as before.
@@ -25,8 +25,10 @@ What changed in Sereno, in plain words. Newest first. To get the changes, run `g
     an SSH server. TightVNC, Xvnc4, RealVNC's virtual desktops, xpra, Sunshine and Guacamole are named as remote
     desktops. GNOME's VNC off a 5900 port gets the VNC command, not RDP's. A socket bound to the loopback device is
     this machine only. Run as root, a socket with no program is no longer called "the kernel's" outright. On macOS,
-    netstat failing is "partly checked", not silence. One byte that isn't UTF-8 in a command's output no longer stops
-    the whole check.
+    netstat failing is "partly checked", not silence. One byte that isn't UTF-8 in a command's output, a program's
+    name or a program's folder no longer stops the whole check or the printed report. A second SSH server that a root
+    login started is "SSH server", high, not a tunnel. Run as root, the step for a socket a user's own systemd holds
+    names that user.
   - Never read: a program's command line, which can hold passwords.
 - **Notes are printed.** A scan with nothing but notes said "7 notes below, for your information:" and then printed
   none of them. They're listed now. (69c4073)
