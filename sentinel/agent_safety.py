@@ -44,6 +44,9 @@ SHELL_DIRS = ((".config/fish/conf.d", "*.fish"), (".config/fish/functions", "*.f
               (".oh-my-zsh/custom", "*.zsh"))
 # fish's universal variables (set -U, set -Ux), kept in plain text: SETUVAR [--export] NAME:value, with \xHH escapes
 FISH_UNIVERSAL = Path(".config") / "fish" / "fish_variables"
+# fish's set [flags] NAME [value] (see _fish_sets)
+FISH_SET = re.compile(r"(?<![\w-])set\s+")
+FISH_SET_NAME = re.compile(r"(%s)\b(?:\s+(\"[^\"]*\"|'[^']*'|[^\s;&|]+))?" % "|".join(CRED_VARS))
 MANAGED_FILES = (Path("/etc/claude-code/managed-settings.json"),
                  Path("/Library/Application Support/ClaudeCode/managed-settings.json"))
 VSCODE_FILES = (Path(".config") / "Code" / "User" / "settings.json",
@@ -91,23 +94,91 @@ CODEX_PAIR = ("codex", "--ask-for-approval never with --sandbox danger-full-acce
 FLAG_ORDER = tuple((agent, flag) for agent, flag, _ in AGENT_FLAGS) + (
     ("codex", "--yolo"), ("gemini", "--yolo"), ("gemini", "-y"), ("gemini", "--approval-mode yolo"), CODEX_PAIR)
 AGENT_NAMES = (("codex", ("codex",)), ("gemini", ("gemini", "gemini-cli")))   # npx @google/gemini-cli
-# Words that run the command after them, each with its options that take the next word as their value, and how many
-# words it takes before the command (timeout's duration): sudo -u root codex, nice -n 5 gemini, timeout 1h codex.
-WRAPPERS = {name: (frozenset(takes.split()), before) for name, takes, before in (
-    ("sudo", "-u -g -h -p -r -t -C -D -R -T -U --user --group --host --prompt --role --type --close-from --chdir "
-             "--chroot --command-timeout --other-user", 0),
-    ("doas", "-u -C", 0), ("env", "-u -C -S --unset --chdir --split-string", 0), ("command", "", 0),
-    ("builtin", "", 0), ("exec", "-a", 0), ("nohup", "", 0), ("noglob", "", 0), ("nocorrect", "", 0),
-    ("time", "-f -o --format --output", 0), ("nice", "-n --adjustment", 0), ("ionice", "-c -n --class --classdata", 0),
-    ("timeout", "-k -s --kill-after --signal", 1), ("stdbuf", "-i -o -e --input --output --error", 0),
-    ("caffeinate", "-t -w", 0), ("unbuffer", "", 0), ("watch", "-n --interval", 0),
-    ("xargs", "-a -d -E -I -L -n -P -s --arg-file --delimiter --max-lines --max-args --max-procs --max-chars "
-              "--process-slot-var", 0),
-    ("npx", "-p --package", 0), ("pnpx", "-p --package", 0), ("bunx", "-p --package", 0),
-    ("uvx", "-p -w --from --with --with-editable --with-requirements --python --index --index-url "
-            "--extra-index-url", 0))}
-# Package runners named in two words: npm exec, pnpm dlx, yarn dlx, bun x
-RUNNERS = {"npm": ("exec", "x"), "pnpm": ("dlx", "exec"), "yarn": ("dlx", "exec"), "bun": ("x",)}
+
+
+def _launcher(takes: str = "", before=0, how: str = "args", code: str = ""):
+    """A launcher's options that take the next word as their value, the words before the command it runs (a number,
+    or a pattern for one word that may be left out), how that command is read (see LAUNCHERS), and its options whose
+    value is code for a shell."""
+    return frozenset(takes.split()), before, how, frozenset(code.split())
+
+
+NPX_TAKES = "-p --package"
+UVX_TAKES = ("-p -w -f --from --with --with-editable --with-requirements --python --index --index-url "
+             "--extra-index-url --default-index --find-links")
+UV_RUN = _launcher(UVX_TAKES + " --extra --group --only-group --package --env-file --directory --project")
+MISE_EXEC = _launcher(how="--", code="-c --command")
+CONDA_RUN = _launcher("-n -p --name --prefix --cwd")
+TMUX_NEW = _launcher("-c -e -F -f -l -n -p -s -t -x -y", how="sh")
+# nvm exec's version, which can be left out: 20, v20.1, lts/iron, node
+NVM_VERSION = re.compile(r"(?:v?\d[\w.]*|lts/\S*|node|stable|unstable|iojs|system|default)$")
+# Programs that run the command after them: sudo -u root codex, timeout 1h codex, envchain work codex. Each has its
+# options that take the next word as their value (read as getopt reads them: sudo -Hu bob is -H, then -u bob), how
+# many words come before the command (timeout's duration, envchain's namespace), and how the command is read:
+# "args", the words after them; "--", the words after a -- (in mise exec node@20 -- codex, the words before it name
+# tools); "sh", their words joined and run by a shell (watch runs them with sh -c, sg with /bin/sh); "none", nothing
+# but what a code option gives (tmux -c; tmux's own options come before its command, after which -c names a folder);
+# "anywhere", the same with the options read wherever they're written (su bob -c '...'). An option whose value is code
+# for a shell (su -c, script -c, flock FILE -c, env -S, whose words come before the rest) has that code read.
+LAUNCHERS = {
+    "sudo": _launcher("-a -C -c -D -g -p -R -r -T -t -U -u --auth-type --close-from --login-class --chdir --group "
+                      "--host --prompt --chroot --role --type --command-timeout --other-user --user"),
+    "doas": _launcher("-a -C -u"), "env": _launcher("-C -u --chdir --unset", code="-S --split-string"),
+    "command": _launcher(), "builtin": _launcher(), "exec": _launcher("-a"), "nohup": _launcher(),
+    "noglob": _launcher(), "nocorrect": _launcher(), "unbuffer": _launcher(), "setsid": _launcher(),
+    "firejail": _launcher(), "time": _launcher("-f -o --format --output"), "nice": _launcher("-n --adjustment"),
+    "ionice": _launcher("-c -n -p -P -u --class --classdata --pid --pgid --uid"),
+    "timeout": _launcher("-k -s --kill-after --signal", 1), "stdbuf": _launcher("-i -o -e --input --output --error"),
+    "caffeinate": _launcher("-t -w"), "chrt": _launcher("-T -P -D --sched-runtime --sched-period --sched-deadline", 1),
+    "taskset": _launcher(before=1), "envchain": _launcher(before=1),
+    "flock": _launcher("-w -E --wait --timeout --conflict-exit-code", 1, code="-c --command"),
+    "watch": _launcher("-n -q --interval --equexit", how="sh"),
+    "xargs": _launcher("-a -d -E -I -L -n -P -s --arg-file --delimiter --max-lines --max-args --max-procs "
+                       "--max-chars --process-slot-var"),
+    "npx": _launcher(NPX_TAKES), "pnpx": _launcher(NPX_TAKES), "bunx": _launcher(NPX_TAKES),
+    "uvx": _launcher(UVX_TAKES), "dotenv": _launcher("-e -v -p"),   # dotenv-cli: dotenv -e .env -- codex
+    "su": _launcher(how="anywhere", code="-c --command -C --session-command"),
+    "script": _launcher("-E -I -O -B -T -m --echo --log-in --log-out --log-io --log-timing --logging-format",
+                        code="-c --command"),
+    "sg": _launcher(before=1, how="sh", code="-c"), "screen": _launcher("-c -e -h -p -S -s -t -T"),
+    "systemd-run": _launcher("-u -p -E -M -H --unit --property --setenv --machine --host --slice --description --uid "
+                             "--gid --nice --working-directory"),
+    "tmux": _launcher("-f -L -S -T", how="none", code="-c"),   # tmux -c '...' runs it with your shell
+}
+# Programs whose subcommand runs a command (npm exec codex, uv tool run gemini, op run -- codex, tmux new 'codex'),
+# each with its own options that take a value, which can come before the subcommand
+SUBCOMMANDS = {
+    "npm": ("", {("exec",): _launcher(NPX_TAKES), ("x",): _launcher(NPX_TAKES)}),
+    "pnpm": ("", {("dlx",): _launcher(NPX_TAKES), ("exec",): _launcher(NPX_TAKES)}),
+    "yarn": ("", {("dlx",): _launcher(NPX_TAKES), ("exec",): _launcher(NPX_TAKES)}),
+    "bun": ("", {("x",): _launcher(NPX_TAKES)}),
+    "uv": ("--directory --project --cache-dir --config-file",
+           {("run",): UV_RUN, ("tool", "run"): _launcher(UVX_TAKES)}),
+    "asdf": ("", {("exec",): _launcher()}),
+    "pixi": ("", {("exec",): _launcher("-s -c -w --spec --channel --with --platform"),
+                  ("run",): _launcher("-e --environment --manifest-path")}),
+    "mise": ("-C -E -j --cd --env --jobs", {("exec",): MISE_EXEC, ("x",): MISE_EXEC}),
+    "direnv": ("", {("exec",): _launcher(before=1)}),
+    "nvm": ("", {("exec",): _launcher(before=NVM_VERSION)}),
+    "op": ("--account --cache --config --encoding --session",
+           {("run",): _launcher("--env-file --account --cache --config --encoding --session")}),
+    "doppler": ("--scope --token --api-host --configuration",
+                {("run",): _launcher("-p -c --project --config --token --scope --name-transformer --mount "
+                                     "--mount-format --mount-template --mount-max-reads --fallback",
+                                     code="--command")}),
+    "infisical": ("--domain --token", {("run",): _launcher("--env --path --projectId --token --tags --domain",
+                                                           code="--command")}),
+    "dotenv": ("-f -q -e --file --quote --export", {("run",): _launcher()}),   # python-dotenv: dotenv run codex
+    "conda": ("", {("run",): CONDA_RUN}), "mamba": ("", {("run",): CONDA_RUN}),
+    "micromamba": ("", {("run",): CONDA_RUN}),
+    "poetry": ("", {("run",): _launcher()}), "pipenv": ("", {("run",): _launcher()}),
+    "tmux": ("-c -f -L -S -T", {(sub,): TMUX_NEW for sub in (
+        "new", "new-session", "new-window", "neww", "split-window", "splitw", "respawn-pane", "respawnp",
+        "respawn-window", "respawnw")}),
+}
+# Commands whose output is a program's path, so that $(which codex) --yolo runs codex: each with the options that
+# make it print one (command -v; fish's command -s)
+LOOKUPS = {"which": ("-a",), "command": ("-v", "-s", "--search"), "type": ("-p", "-P"), "whence": ("-p",)}
 # Words of the shell's own (bash, zsh, fish) after which a command starts
 SHELL_KEYWORDS = ("if", "then", "else", "elif", "do", "while", "until", "!", "coproc", "and", "or", "not", "begin")
 SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "fish")
@@ -540,21 +611,27 @@ def _code(line: str) -> str:
 def _commands(text: str) -> list:
     """Each simple command in a line of shell or fish code, as its words with quotes and escapes taken off, as the
     shell reads them. A command ends at ; & | and at ( ) and a word-initial { or }; $(...), (...) and `...` hold
-    commands of their own, read the same way. What one puts into a word isn't known, so it adds nothing to it. A #
-    that starts a word starts a comment. One pass, with a stack rather than recursion, however deep the nesting."""
+    commands of their own, read the same way. One that looks a program up ($(which codex)) stands for that program;
+    what any other puts into a word isn't known, so it adds nothing to it. A redirection (>log, 2>&1, &>log, <<EOF)
+    takes the word after it as its target, and neither is a word of the command. A # that starts a word starts a
+    comment. One pass, with a stack rather than recursion, however deep the nesting."""
     out, stack = [], []
-    words, word, quote, closer = [], None, None, None   # word: its characters so far, or None between words
+    # word: its characters so far, or None between words. target: the next word is a redirection's target
+    words, word, quote, closer, target = [], None, None, None, False
+    escaped = -1   # the index just past the last character a backslash escaped
     i, n = 0, len(text)
     while i < n:
         c = text[i]
         i += 1
         if c == "`" and closer == "`" or c == ")" and closer == ")" and quote is None:
-            if word is not None:   # the end of a command substitution: back to the command it's in
+            if word is not None and not target:   # the end of a command substitution: back to the command it's in
                 words.append("".join(word))
             if words:
                 out.append(words)
-            words, word, quote, closer = stack.pop()
+            program = _looked_up(words)
+            words, word, quote, closer, target = stack.pop()
             word = [] if word is None else word
+            word.extend(program)
         elif quote == "'":
             if c == "'":
                 quote = None
@@ -567,11 +644,12 @@ def _commands(text: str) -> list:
             else:
                 word.append(text[i:i + 1])
                 i += 1
-        elif c == "`" or c == "(" and (quote is None or text[i - 2:i - 1] == "$"):
+                escaped = i
+        elif c == "`" or c == "(" and (quote is None or text[i - 2:i - 1] == "$" and escaped != i - 1):
             if c == "(" and word and word[-1] == "$":
                 word.pop()   # the $ of $( is the substitution's
-            stack.append((words, word, quote, closer))
-            words, word, quote, closer = [], None, None, ")" if c == "(" else "`"
+            stack.append((words, word, quote, closer, target))
+            words, word, quote, closer, target = [], None, None, ")" if c == "(" else "`", False
         elif quote == '"':
             if c == '"':
                 quote = None
@@ -581,25 +659,47 @@ def _commands(text: str) -> list:
             word, quote = [] if word is None else word, c
         elif c == "#" and word is None:
             break
+        elif c in "<>" or c == "&" and text[i:i + 1] == ">":
+            # a file descriptor's number written just before the operator (2>) is part of the redirection
+            if word is not None and not target and not "".join(word).isdigit():
+                words.append("".join(word))
+            word, target = None, True
+            if text[i:i + 1] == "&":   # >&2, <&0. A | after > is a pipe: fish's 2>| pipes errors on
+                i += 1
         elif c.isspace() or c in ";&|)" or c in "{}" and word is None:
             if word is not None:
-                words.append("".join(word))
-                word = None
-            if not c.isspace() and words:
-                out.append(words)
-                words = []
+                if not target:
+                    words.append("".join(word))
+                word, target = None, False
+            if not c.isspace():
+                target = False
+                if words:
+                    out.append(words)
+                    words = []
         else:
             word = [] if word is None else word
             word.append(c)
     while True:
-        if word is not None:
+        if word is not None and not target:
             words.append("".join(word))
         if words:
             out.append(words)
         if not stack:
             return out
-        words, word, quote, closer = stack.pop()
+        words, word, quote, closer, target = stack.pop()
         word = [] if word is None else word
+
+
+def _looked_up(words: list) -> str:
+    """The program a command substitution stands for when all it does is look one up: which codex, command -v codex,
+    type -p gemini (see LOOKUPS). Otherwise "". Only a program's name, and only a short one, goes up: copying a long
+    one into each of a thousand nested $(which $(which ...)) took seconds."""
+    if len(words) < 2 or words[0] not in LOOKUPS or words[-1][:1] == "-":
+        return ""
+    options, name = words[1:-1], _program(words[-1])
+    if all(o in LOOKUPS[words[0]] for o in options) and (options or words[0] == "which") and len(name) <= 64:
+        return name
+    return ""
 
 
 def _program(word: str) -> str:
@@ -608,11 +708,44 @@ def _program(word: str) -> str:
     return name.split("@", 1)[0]
 
 
+def _getopt(words: list, i: int, takes=(), code=(), permute: bool = False):
+    """Read options from words[i] on as getopt reads them: -Hu bob is -H, then -u with the value bob; -ubob gives -u
+    the value bob; --user=bob and --user bob both give --user the value bob (for the options in takes and code). Returns
+    (the index of the first word that's neither an option nor an option's value, with a -- that ends the options left
+    there; the value of the first option in code, or None). With permute, words that aren't options are passed over,
+    as su reads its options wherever they're written. One look at each character."""
+    n = len(words)
+    while i < n and words[i] != "--":
+        a = words[i]
+        i += 1
+        if a[:1] != "-":
+            if permute:
+                continue
+            return i - 1, None
+        if a[:2] == "--":
+            name, eq, value = a.partition("=")
+            if name in takes or name in code:
+                if not eq:
+                    value, i = (words[i] if i < n else ""), i + 1
+                if name in code:
+                    return i, value
+            continue
+        for k in range(1, len(a)):
+            if "-" + a[k] in takes or "-" + a[k] in code:
+                value = a[k + 1:]   # the rest of the word, or the next word when it's the last letter
+                if not value:
+                    value, i = (words[i] if i < n else ""), i + 1
+                if "-" + a[k] in code:
+                    return i, value
+                break
+    return i, None
+
+
 def _skip_options(words: list, i: int, takes=()) -> int:
-    """The index of the first word from i on that isn't an option (- and -- included) or the value of one in takes."""
-    while i < len(words) and words[i][:1] == "-":
-        i += 2 if words[i] in takes else 1
-    return i
+    """The index of the first word from i on that isn't an option, the value of one in takes, or the -- that ends
+    them."""
+    i = _getopt(words, i, takes)[0]
+    return i + 1 if i < len(words) and words[i] == "--" else i
 
 
 def _alias_bodies(args: list) -> list:
@@ -652,23 +785,54 @@ def _shell_string(args: list):
     return None
 
 
+def _launched(words: list, i: int, name: str):
+    """What the launcher words[i] runs (see LAUNCHERS and SUBCOMMANDS): the index of its command's first word
+    (len(words) or more when there's none), or the code it gives a shell to run; None when words[i] isn't a launcher.
+    It reads up to the command, or to the -- before it, once."""
+    spec, j, n = None, i + 1, len(words)
+    if name in SUBCOMMANDS:
+        takes, subcommands = SUBCOMMANDS[name]
+        k = _getopt(words, i + 1, frozenset(takes.split()))[0]
+        for sub, launcher in subcommands.items():
+            if tuple(words[k:k + len(sub)]) == sub:
+                spec, j = launcher, k + len(sub)
+    spec = spec or LAUNCHERS.get(name)
+    if spec is None:
+        return None
+    takes, before, how, code = spec
+    j, value = _getopt(words, j, takes, code, how == "anywhere")
+    if value is not None:   # env -S: the string's words come before the rest, which are the command's arguments
+        return " ".join([value] + words[j:]) if name == "env" else value
+    if j < n and words[j] == "--":
+        j += 1
+    elif how == "--":   # the words before the -- name tools
+        while j < n and words[j] != "--":
+            j += 1
+        j += 1
+    j += before if isinstance(before, int) else int(j < n and bool(before.match(words[j])))
+    if j < n and words[j] in code:   # after the words before the command: flock FILE -c '...'
+        return words[j + 1] if j + 1 < n else ""
+    if how == "sh":
+        return " ".join(words[j:])
+    return n if how in ("none", "anywhere") else j
+
+
 def _command_run(words: list):
     """What one simple command runs: (agent, its arguments) for codex or gemini, after any variable assignments,
-    shell keywords and wrappers (sudo -u root, timeout 1h, npx -y, bun x); else (None, the code it holds for the shell
-    to read: an alias's body, an abbreviation's expansion, eval's words or sh -c's string)."""
+    shell keywords and launchers (sudo -u root, timeout 1h, npx -y, bun x, op run --); else (None, the code it holds
+    for a shell to read: an alias's body, an abbreviation's expansion, eval's words, sh -c's or su -c's string)."""
     i, n = 0, len(words)
     while i < n:
         w = words[i]
-        name = _program(w)
         if ASSIGNMENT.match(w) or w in SHELL_KEYWORDS or not w:   # not w: a $(...) of its own, which may be empty
             i += 1
-        elif name in WRAPPERS:
-            takes, before = WRAPPERS[name]
-            i = _skip_options(words, i + 1, takes) + before
-        elif name in RUNNERS and i + 1 < n and words[i + 1] in RUNNERS[name]:
-            i = _skip_options(words, i + 2, WRAPPERS["npx"][0])
-        else:
+            continue
+        step = _launched(words, i, _program(w))
+        if step is None:
             break
+        if isinstance(step, str):
+            return None, [step]
+        i = step
     if i >= n:
         return None, []
     name, args = _program(words[i]), words[i + 1:]
@@ -755,17 +919,37 @@ def credential_assignments(code: str) -> list:
     NAME=value (with or without export, or as ${NAME=value}), and fish's set -gx NAME value. $NAME=... isn't one. A
     default in ${NAME:-value} or ${NAME:=value} counts when it looks like a key: it's written in the file all the same
     (and ${NAME:-unset} is only a word to print)."""
-    out = []
+    out, sets = [], _fish_sets(code)
     for name in CRED_VARS:
         for m in re.finditer(r"(?<![\w$])%s=(\"[^\"]*\"|'[^']*'|[^\s;&|)}`'\"]*)" % name, code):
             out.append((name, m.group(1)))
         # a default holding a $ comes from elsewhere (_literal); stopping at one keeps a line of unclosed ${NAME:-
-        # to one pass. And set is a word of its own: from -set, each of a run of flags would start another try.
+        # to one pass
         for m in re.finditer(r"\$\{%s(?::?-|:=)([^}$]*)\}" % name, code):
             if _looks_like_key(_literal(m.group(1))):
                 out.append((name, m.group(1)))
-        for m in re.finditer(r"(?<![\w-])set\s+(?:-\S*\s+)*%s\b(?:\s+(\"[^\"]*\"|'[^']*'|[^\s;&|]+))?" % name, code):
-            out.append((name, m.group(1) or ""))
+        out += [(name, value) for variable, value in sets if variable == name]
+    return out
+
+
+def _fish_sets(code: str) -> list:
+    """(variable, value as written) for each of fish's `set [flags] NAME [value]` in a line that sets an agent
+    credential variable. Each run of flags is found once, from the end of the line back, so a set that starts inside
+    another's flags (set -a/set -a/set ..., 17 s for 14 KB when each set read the flags after it again) costs nothing
+    more: one pass, however the line is built."""
+    tokens = [m.start() for m in re.finditer(r"\S+", code)]
+    index = {start: k for k, start in enumerate(tokens)}
+    # after[k]: the first word from the k-th on that isn't a flag (a flag starts with -)
+    after = [len(tokens)] * (len(tokens) + 1)
+    for k in range(len(tokens) - 1, -1, -1):
+        after[k] = after[k + 1] if code[tokens[k]] == "-" else k
+    out, seen = [], set()
+    for start in FISH_SET.finditer(code):
+        k = after[index.get(start.end(), len(tokens))]
+        m = FISH_SET_NAME.match(code, tokens[k]) if k < len(tokens) and k not in seen else None
+        if m:
+            seen.add(k)
+            out.append((m.group(1), m.group(2) or ""))
     return out
 
 

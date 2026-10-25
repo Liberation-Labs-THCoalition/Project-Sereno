@@ -9,7 +9,10 @@ What changed in Sereno, in plain words. Newest first. To get the changes, run `g
   approved, or every shell command allowed (including a rule for a program that runs whatever it's given, such as
   `Bash(python3:*)`); Codex set to never ask with no sandbox; VS Code's global auto-approve; Gemini CLI letting every
   shell command through; and shell aliases, functions and fish abbreviations that start `claude`, `codex` or
-  `gemini` with their skip flags. In your own settings that's advice (medium), with how to turn the prompt back on;
+  `gemini` with their skip flags, also through programs that start another (`sudo -Hu bob`, `timeout`, `npx`,
+  `op run --`, `mise exec --`, `uv tool run`, `watch`, `su -c`, `tmux new` and more) or `$(which codex)`, and with a
+  redirection written against a flag (`--yolo>log`). Each shell line is read in one pass, so a file built to slow the
+  scan down can't. In your own settings that's advice (medium), with how to turn the prompt back on;
   in a project folder's Claude Code settings it's high. It also reports agent logins left exposed: a login file
   other accounts can read (`chmod 600` fixes it), and an agent API key or token written into a shell startup file,
   fish's universal variables or your Claude Code settings, by name and line, never the value.

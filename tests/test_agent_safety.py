@@ -786,6 +786,36 @@ def test_a_fish_set_line_with_many_flags_is_read_quickly():
     assert time.time() - start < 1
 
 
+@pytest.mark.parametrize("line,found", [
+    ("set -gx ANTHROPIC_API_KEY abc", [("ANTHROPIC_API_KEY", "abc")]),
+    ("set ANTHROPIC_API_KEY", [("ANTHROPIC_API_KEY", "")]),
+    ("set -Ux OPENAI_API_KEY 'a b'; set -x GEMINI_API_KEY \"c\"",
+     [("OPENAI_API_KEY", "'a b'"), ("GEMINI_API_KEY", '"c"')]),
+    ("begin; set -l x 1; set --export ANTHROPIC_AUTH_TOKEN t; end", [("ANTHROPIC_AUTH_TOKEN", "t")]),
+    ("set -gx ANTHROPIC_API_KEY abc;echo", [("ANTHROPIC_API_KEY", "abc")]),
+    # a set that starts inside another's flags reads the same name: one assignment, not two
+    ("set -q/set -gx ANTHROPIC_API_KEY abc", [("ANTHROPIC_API_KEY", "abc")]),
+    ("set -gx ANTHROPIC_API_KEY_OLD abc", []),          # another variable
+    ("xset -gx ANTHROPIC_API_KEY abc", []),             # not set
+    ("-set ANTHROPIC_API_KEY abc", []),
+    ("set -gx X ANTHROPIC_API_KEY", []),                # the name isn't the first word after the flags
+    ("set -gx", []), ("set ", []), ("set", []),
+])
+def test_fish_set_lines_are_read_as_before(line, found):
+    """The one-pass reader reads fish's set as the old pattern did (verify round 2 changed only its speed)."""
+    assert ag.credential_assignments(line) == found
+
+
+def test_a_fish_file_full_of_sets_doesnt_slow_the_check(home):
+    """The verifier's line: a 14 KB comment of sets in config.fish took 14.9 s through the scanner at 94cc7d5."""
+    import time
+    write(home / ".config" / "fish" / "config.fish",
+          "# set " + "-x/set " * 2000 + "\nset " + "-x;set " * 2000 + "\nset \nset -gx\nalias cx 'codex --yolo'\n")
+    start = time.time()
+    assert [(f.severity, f.details["line"]) for f in run(home)] == [("medium", 5)]
+    assert time.time() - start < 5
+
+
 def test_a_one_line_triple_quoted_toml_value_ends_on_its_line(home):
     write(home / ".codex" / "config.toml", 'instructions = """be brief"""\napproval_policy = "never"\n'
                                            'sandbox_mode = "danger-full-access"\n')
@@ -884,9 +914,130 @@ def test_agents_run_through_wrappers_aliases_and_abbreviations_are_found(line, f
     "codex --yolo $(",   # a substitution that goes on to the next line
     "codex --model x#1 --yolo",   # a # inside a word isn't a comment
     "make build && codex --yolo", "sleep 1 & codex --yolo", "make || codex --yolo",
+    # launchers 6d6abb4 found by matching anywhere and 94cc7d5's table missed (verify round 2), and their kin
+    "asdf exec codex --yolo", "pixi exec codex --yolo", "pixi exec -s nodejs codex --yolo", "pixi run codex --yolo",
+    "mise exec -- codex --yolo", "mise x node@20 python@3.12 -- codex --yolo", "mise -C ~/p exec -- codex --yolo",
+    "mise exec -c 'codex --yolo'", "op run --env-file=.env -- codex --yolo", "op run --env-file .env -- codex --yolo",
+    "op --account me run -- codex --yolo", "doppler run -- codex --yolo", "doppler run -p app -c dev -- codex --yolo",
+    "doppler run --command 'codex --yolo'", "infisical run --env=dev -- codex --yolo",
+    "infisical run --env dev -- codex --yolo", "infisical run --command='codex --yolo'", "dotenv -- codex --yolo",
+    "dotenv -e .env -- codex --yolo", "dotenv run codex --yolo", "dotenv -f .env run -- codex --yolo",
+    "envchain openai codex --yolo", "setsid -f codex --yolo", "flock /tmp/l codex --yolo",
+    "flock -w 5 /tmp/l codex --yolo", "flock /tmp/l -c 'codex --yolo'", "taskset -c 0 codex --yolo",
+    "taskset 0x3 codex --yolo", "uv run codex --yolo", "uv run --with rich codex --yolo", "uv tool run codex --yolo",
+    "uv --directory x tool run --from y codex --yolo", "direnv exec . codex --yolo", "nvm exec 20 codex --yolo",
+    "nvm exec codex --yolo", "nvm exec --silent lts/iron codex --yolo", "conda run -n ai codex --yolo",
+    "mamba run -n ai codex --yolo", "micromamba run -p /opt/env codex --yolo", "poetry run codex --yolo",
+    "pipenv run codex --yolo", "chrt -i 0 codex --yolo", "chrt -T 5 -i 0 codex --yolo",
+    "systemd-run --user -u ai codex --yolo", "firejail --noprofile codex --yolo", "screen -dmS ai codex --yolo",
+    "script -qc 'codex --yolo' /dev/null", "script -c 'codex --yolo'", "script -B t -c 'codex --yolo'",
+    "sg docker -c 'codex --yolo'", "sg docker 'codex --yolo'", "env -S 'codex --yolo'", "env -S'codex' --yolo",
+    "env --split-string='codex --yolo'", "env -C /tmp codex --yolo", "doas -a bsdauth codex --yolo",
+    "ionice -p 1 codex --yolo", "watch -n5 'codex --yolo'", "watch 'codex --yolo'", "watch -q 3 codex --yolo",
+    "su -c 'codex --yolo' bob", "su bob -c 'codex --yolo'", "su - bob --command='codex --yolo'",
+    "su -lc 'codex --yolo' bob", "su -s /bin/sh -C 'codex --yolo' bob", "su --session-command='codex --yolo' bob",
+    "flock /tmp/l --command 'codex --yolo'", "script --command 'codex --yolo'", "mise exec --command 'codex --yolo'",
+    "tmux new -d 'codex --yolo'", "tmux new-session -d -s ai codex --yolo", "tmux -L work new-window 'codex --yolo'",
+    "tmux split-window -h -t 1 'codex --yolo'", "tmux -c 'codex --yolo'", "tmux neww 'codex --yolo'",
+    "tmux splitw 'codex --yolo'", "tmux respawn-pane -k 'codex --yolo'", "tmux respawnp 'codex --yolo'",
+    "tmux respawn-window 'codex --yolo'", "tmux respawnw 'codex --yolo'", "nvm exec node codex --yolo",
+    "nvm exec v20.1 codex --yolo", "nvm exec default codex --yolo", "nvm exec system codex --yolo",
+    "nvm exec stable codex --yolo", "nvm exec unstable codex --yolo", "nvm exec iojs codex --yolo",
+    # getopt's ways to give a value: clustered (-Hu bob), attached (-ubob), long (--user bob), and -- ending them
+    "sudo -Hu bob codex --yolo", "sudo -iu bob codex --yolo", "sudo -EHu bob codex --yolo", "sudo -ubob codex --yolo",
+    "sudo --user bob codex --yolo", "sudo --user=bob codex --yolo", "sudo -- codex --yolo",
+    "sudo -c staff codex --yolo", "sudo -a pam codex --yolo", "sudo -ulou codex --yolo",   # a user named lou
+    # a substitution that looks the program up runs it
+    "$(which codex) --yolo", '"$(command -v codex)" --yolo', "`type -p codex` --yolo", "$(which -a codex) --yolo",
+    "$(which /usr/local/bin/codex) --yolo", "(command -s codex) --yolo", "$(which $(which codex)) --yolo",
+    "$(command --search codex) --yolo", "$(type -P codex) --yolo", "$(whence -p codex) --yolo",
+    "$(which /" + "opt/" * 20 + "codex) --yolo",   # a long path to a short name
+    "$(which) codex --yolo", "$(which -a) codex --yolo",   # nothing looked up: no output, and codex is the command
+    # a redirection's target isn't a word of the command, and it can touch the words around it
+    "codex --yolo>log", "codex 2>&1 --yolo", "codex &>log --yolo", "codex --yolo&>log", ">log codex --yolo",
+    "codex <<<input --yolo", "codex >>log --yolo", "codex 2> /dev/null --yolo", "codex > $(mktemp) --yolo",
+    "x=$(codex 2>&1 --yolo)", "make >$(codex --yolo)",   # a substitution in a target still runs
+    "/usr/bin/env codex --yolo",
+    # a | after > is a pipe, as in fish's 2>| (bash's >| would write to a file named codex; read as a pipe, to find it)
+    "make 2>| codex --yolo",
 ])
 def test_every_wrapper_keyword_shell_and_runner_is_read_through(line):
     assert ag.skip_flags(line) == [("codex", "--yolo")]
+
+
+@pytest.mark.parametrize("line", [
+    # where the agent's name is a value, a tool, a file, an account or a namespace, not the program run
+    "sudo -Hu codex make --yolo", "sudo -ucodex make --yolo", "su codex -c 'make --yolo'", "su -c 'echo codex --yolo'",
+    "mise exec codex -- make --yolo", "mise exec codex --yolo", "flock /tmp/codex make --yolo",
+    "envchain codex make --yolo", "direnv exec codex make --yolo", "taskset codex make --yolo",
+    "nvm exec 20 make codex --yolo", "tmux new -s codex make --yolo", "watch -n 5 'echo codex --yolo'",
+    "op run -- make codex --yolo", "sg codex 'make --yolo'", "timeout 5 make codex --yolo", "chrt 0 make codex --yolo",
+    # a redirection's target is a file, and an escaped \$( isn't a substitution
+    "codex > --yolo", "codex 2>--yolo", "codex >--yolo &", "x=$(codex >--yolo)", "codex >--yolo>x",
+    "uv tool install codex --yolo", 'echo "\\$(codex --yolo)"',
+    "echo $(which codex) --yolo", "$(which codex --yolo)", "$(command codex) --yolo", "$(command -p codex) --yolo",
+    "$(which make) codex --yolo", "command -v codex >/dev/null && echo --yolo", "dotenv run make codex --yolo",
+    # su runs only the code its -c gives, and its other words are an account and the shell's arguments
+    "su -c codex bob --yolo", "su -- codex --yolo",
+    # tmux's own words name tmux commands, and after one, -c names its starting folder
+    "tmux codex --yolo", "tmux attach -c 'codex --yolo'",
+])
+def test_launchers_read_the_agent_only_where_it_runs(line):
+    assert ag.skip_flags(line) == []
+
+
+UVX = ("-p -w -f --from --with --with-editable --with-requirements --python --index --index-url --extra-index-url "
+       "--default-index --find-links")
+NPX = "-p --package"
+# Every option a launcher reads a value for, written out here rather than read from the module's tables: dropping one
+# would read its value (V) as the program run, and codex would go unfound
+LAUNCHER_OPTIONS = [
+    ("sudo %s V codex --yolo", "-a -C -c -D -g -p -R -r -T -t -U -u --auth-type --close-from --login-class --chdir "
+                               "--group --host --prompt --chroot --role --type --command-timeout --other-user --user"),
+    ("doas %s V codex --yolo", "-a -C -u"), ("env %s V codex --yolo", "-C -u --chdir --unset"),
+    ("exec %s V codex --yolo", "-a"), ("time %s V codex --yolo", "-f -o --format --output"),
+    ("nice %s V codex --yolo", "-n --adjustment"),
+    ("ionice %s V codex --yolo", "-c -n -p -P -u --class --classdata --pid --pgid --uid"),
+    ("timeout %s V 1h codex --yolo", "-k -s --kill-after --signal"),
+    ("stdbuf %s V codex --yolo", "-i -o -e --input --output --error"), ("caffeinate %s V codex --yolo", "-t -w"),
+    ("chrt %s V 0 codex --yolo", "-T -P -D --sched-runtime --sched-period --sched-deadline"),
+    ("flock %s V /tmp/l codex --yolo", "-w -E --wait --timeout --conflict-exit-code"),
+    ("watch %s V codex --yolo", "-n -q --interval --equexit"),
+    ("xargs %s V codex --yolo", "-a -d -E -I -L -n -P -s --arg-file --delimiter --max-lines --max-args --max-procs "
+                                "--max-chars --process-slot-var"),
+    ("npx %s V codex --yolo", NPX), ("pnpx %s V codex --yolo", NPX), ("bunx %s V codex --yolo", NPX),
+    ("npm exec %s V codex --yolo", NPX), ("npm x %s V codex --yolo", NPX), ("pnpm dlx %s V codex --yolo", NPX),
+    ("pnpm exec %s V codex --yolo", NPX), ("yarn dlx %s V codex --yolo", NPX), ("yarn exec %s V codex --yolo", NPX),
+    ("bun x %s V codex --yolo", NPX), ("uvx %s V codex --yolo", UVX), ("uv tool run %s V codex --yolo", UVX),
+    ("uv run %s V codex --yolo", UVX + " --extra --group --only-group --package --env-file --directory --project"),
+    ("uv %s V run codex --yolo", "--directory --project --cache-dir --config-file"),
+    ("dotenv %s V -- codex --yolo", "-e -v -p"), ("dotenv %s V run codex --yolo", "-f -q -e --file --quote --export"),
+    ("script %s V -c 'codex --yolo'", "-E -I -O -B -T -m --echo --log-in --log-out --log-io --log-timing "
+                                      "--logging-format"),
+    ("screen %s V codex --yolo", "-c -e -h -p -S -s -t -T"),
+    ("systemd-run %s V codex --yolo", "-u -p -E -M -H --unit --property --setenv --machine --host --slice "
+                                      "--description --uid --gid --nice --working-directory"),
+    ("tmux %s V new codex --yolo", "-c -f -L -S -T"), ("tmux %s V -c 'codex --yolo'", "-f -L -S -T"),
+    ("tmux new %s V codex --yolo", "-c -e -F -f -l -n -p -s -t -x -y"),
+    ("pixi exec %s V codex --yolo", "-s -c -w --spec --channel --with --platform"),
+    ("pixi run %s V codex --yolo", "-e --environment --manifest-path"),
+    ("mise %s V exec -- codex --yolo", "-C -E -j --cd --env --jobs"),
+    ("op %s V run -- codex --yolo", "--account --cache --config --encoding --session"),
+    ("op run %s V codex --yolo", "--env-file --account --cache --config --encoding --session"),
+    ("doppler %s V run codex --yolo", "--scope --token --api-host --configuration"),
+    ("doppler run %s V codex --yolo", "-p -c --project --config --token --scope --name-transformer --mount "
+                                      "--mount-format --mount-template --mount-max-reads --fallback"),
+    ("infisical %s V run codex --yolo", "--domain --token"),
+    ("infisical run %s V codex --yolo", "--env --path --projectId --token --tags --domain"),
+    ("conda run %s V codex --yolo", "-n -p --name --prefix --cwd"), ("mamba run %s V codex --yolo", "-n -p --name"),
+    ("micromamba run %s V codex --yolo", "-n -p --prefix --cwd"),
+]
+
+
+@pytest.mark.parametrize("template,options", LAUNCHER_OPTIONS, ids=[t.split(" %s")[0] for t, _ in LAUNCHER_OPTIONS])
+def test_every_option_a_launcher_takes_a_value_for_is_read_with_its_value(template, options):
+    missed = [o for o in options.split() if ag.skip_flags(template % o) != [("codex", "--yolo")]]
+    assert missed == []
 
 
 @pytest.mark.parametrize("line,flags", [
@@ -906,6 +1057,8 @@ def test_every_wrapper_keyword_shell_and_runner_is_read_through(line):
     ("gemini -a never -s danger-full-access", []),
     ("alias n=npm", []),
     ("gemini --approval-mode", []),
+    # a redirection between an option and its value isn't the value
+    ("codex -a 2>/dev/null never -s danger-full-access", [CODEX_PAIR]),
 ])
 def test_options_and_quoting_are_read_as_the_tools_and_shell_read_them(line, flags):
     assert ag.skip_flags(line) == flags
@@ -956,6 +1109,15 @@ def test_fish_aliases_abbreviations_and_wrapped_agents_are_reported_by_name(home
     pytest.param(ag.credential_assignments, "${ANTHROPIC_API_KEY:-" * 4000, id="defaults"),
     # from each -set, the flags after it were tried again
     pytest.param(ag.credential_assignments, "set " + "-set " * 2500, id="fish-set"),
+    # and from each set after any other character but a letter, digit, _ or -: 17 s for 2,000 at 94cc7d5
+    pytest.param(ag.credential_assignments, "set " + "-a/set " * 2500, id="fish-set-after-slash"),
+    pytest.param(ag.credential_assignments, "set " + "".join("-a%sset " % c for c in "/;'(.:=") * 400,
+                 id="fish-set-after-punctuation"),
+    # a looked-up program's name was copied into every level of nested $(which $(which ...)): 6 s for 43 KB
+    pytest.param(ag.skip_flags, "$(which " * 3000 + "A" * 16000 + ")" * 3000, id="nested-lookups"),
+    # every launcher and redirection, chained: each reads its own words once
+    pytest.param(ag.skip_flags, "mise x a -- op run -- su -c tmux new watch sg g dotenv run 2>&1 >x " * 300,
+                 id="launchers"),
     # \s* around a lazy name that can hold spaces
     pytest.param(ag.toml_tables, "[" + " " * 1400 + "x", id="toml-header"),
     # redact() on thousands of characters of a-a-a-
