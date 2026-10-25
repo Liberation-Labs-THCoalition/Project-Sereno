@@ -792,6 +792,200 @@ def test_a_one_line_triple_quoted_toml_value_ends_on_its_line(home):
     assert [f.details["profile"] for f in run(home)] == [None]
 
 
+CODEX_PAIR = ("codex", "--ask-for-approval never with --sandbox danger-full-access")
+
+
+@pytest.mark.parametrize("line,flags", [
+    # fish: alias NAME DEFINITION (no =), and abbreviations, whose words fish joins and runs
+    ("alias cx 'codex --yolo'", [("codex", "--yolo")]),
+    ("alias --save cx 'codex --yolo'", [("codex", "--yolo")]),
+    ("alias ca 'codex -a never -s danger-full-access'", [CODEX_PAIR]),
+    ("alias -- cx='codex --yolo'", [("codex", "--yolo")]),
+    ("abbr -a gy gemini --yolo", [("gemini", "--yolo")]),
+    ("abbr --add --position anywhere gy -- gemini -y", [("gemini", "-y")]),
+    ("abbr gy 'gemini --approval-mode yolo'", [("gemini", "--approval-mode yolo")]),
+    ("abbr -a gy -r '^g$' gemini --yolo", [("gemini", "--yolo")]),
+    ("abbr -a gy --regex '^g$' gemini --yolo", [("gemini", "--yolo")]),
+    ("abbr -a gy -c git gemini --yolo", [("gemini", "--yolo")]),
+    ("abbr -a gy --command git gemini --yolo", [("gemini", "--yolo")]),
+    # an assignment's value can hold a command substitution with spaces in it
+    ("alias g='GEMINI_API_KEY=$(secret-tool lookup service gemini) gemini -y'", [("gemini", "-y")]),
+    ("x=$(echo $(codex --yolo))", [("codex", "--yolo")]),
+    # the name escaped or quoted, as people do to skip an alias of the same name
+    ("alias g2='\\gemini --yolo'", [("gemini", "--yolo")]),
+    ('"gemini" --yolo', [("gemini", "--yolo")]),
+    ("'codex' --yolo", [("codex", "--yolo")]),
+    # wrappers, with their own options and values
+    ("alias cx='timeout 3600 codex --yolo'", [("codex", "--yolo")]),
+    ("timeout -s KILL 1h codex --yolo", [("codex", "--yolo")]),
+    ("caffeinate -i codex --yolo", [("codex", "--yolo")]),
+    ("stdbuf -oL gemini -y", [("gemini", "-y")]),
+    ("uvx --from gemini-cli gemini --yolo", [("gemini", "--yolo")]),
+    ("bun x @google/gemini-cli --yolo", [("gemini", "--yolo")]),
+    ("npm exec -- @openai/codex --yolo", [("codex", "--yolo")]),
+    ("npx -y @openai/codex@latest --yolo", [("codex", "--yolo")]),
+    ("ls | xargs -n 1 codex --yolo", [("codex", "--yolo")]),
+    ("watch -n 5 gemini -y", [("gemini", "-y")]),
+    ("builtin command gemini -y", [("gemini", "-y")]),
+    ("sudo -u alice codex --yolo", [("codex", "--yolo")]),
+    ("nice -n 10 gemini --yolo", [("gemini", "--yolo")]),
+    ("case $1 in y) gemini -y;; esac", [("gemini", "-y")]),
+    # code run from a string
+    ("eval 'codex --yolo'", [("codex", "--yolo")]),
+    ("bash -lc 'codex --yolo'", [("codex", "--yolo")]),
+    ("fish --command='gemini -y'", [("gemini", "-y")]),
+    # attached option values and yargs' other spellings
+    ("codex -anever -sdanger-full-access", [CODEX_PAIR]),
+    ("gemini --approvalMode yolo", [("gemini", "--approval-mode yolo")]),
+    ("gemini --yolo=true", [("gemini", "--yolo")]),
+    # safe twins
+    ("alias cx 'codex'", []),
+    ("abbr -e gy", []),
+    ("abbr -a gy -f yolo_gemini", []),            # expands through a function
+    ("abbr -a x echo gemini --yolo", []),
+    ("sudo -u codex make --yolo", []),            # codex is the account here
+    ("timeout 3600 make gemini -y", []),
+    ("echo $(date) gemini -y", []),               # still echo's argument after a substitution
+    ("eval echo codex --yolo", []),
+    ("bash -c 'echo codex --yolo'", []),
+    ("bash setup.sh codex --yolo", []),
+    ("gemini -- --yolo", []),                     # after --, words are the prompt
+    ("gemini 'fix --yolo mode'", []),
+    ("codex -a never; codex -s danger-full-access", []),   # each command keeps one safeguard
+    ("alias cx='codex -a never' cy='codex -s danger-full-access'", []),
+])
+def test_agents_run_through_wrappers_aliases_and_abbreviations_are_found(line, flags):
+    assert ag.skip_flags(line) == flags
+
+
+# Every wrapper (with an option that takes a value), shell keyword, shell and package runner, written out here rather
+# than read from the module's tables, so that dropping one from a table fails
+@pytest.mark.parametrize("line", [
+    "sudo codex --yolo", "doas -u alice codex --yolo", "env -u OPENAI_API_KEY codex --yolo", "env - codex --yolo",
+    "command codex --yolo", "builtin codex --yolo", "exec -a cx codex --yolo", "nohup codex --yolo",
+    "noglob codex --yolo", "nocorrect codex --yolo", "time -f %e codex --yolo", "nice -n 5 codex --yolo",
+    "ionice -c 3 codex --yolo", "timeout -k 5 1h codex --yolo", "stdbuf -i 0 codex --yolo",
+    "caffeinate -t 600 codex --yolo", "unbuffer codex --yolo", "watch -n 5 codex --yolo",
+    "xargs -a list.txt codex --yolo", "npx -p tsx codex --yolo", "pnpx -p tsx codex --yolo",
+    "bunx -p tsx codex --yolo", "uvx -p 3.12 codex --yolo", "PATH+=:/opt/bin codex --yolo",
+    "if codex --yolo", "then codex --yolo", "else codex --yolo", "elif codex --yolo", "do codex --yolo",
+    "while codex --yolo", "until codex --yolo", "! codex --yolo", "coproc codex --yolo", "and codex --yolo",
+    "or codex --yolo", "not codex --yolo", "begin codex --yolo",
+    "sh -c 'codex --yolo'", "bash -c 'codex --yolo'", "zsh -c 'codex --yolo'", "dash -c 'codex --yolo'",
+    "ksh -c 'codex --yolo'", "fish -c 'codex --yolo'", "fish --command 'codex --yolo'", "bash -c -- 'codex --yolo'",
+    "bash -o pipefail -c 'codex --yolo'", "bash +o posix -c 'codex --yolo'", "bash -O extglob -c 'codex --yolo'",
+    "bash +O extglob -c 'codex --yolo'",
+    "npm exec codex --yolo", "npm x codex --yolo", "pnpm dlx codex --yolo", "pnpm exec codex --yolo",
+    "yarn dlx codex --yolo", "yarn exec codex --yolo", "bun x codex --yolo",
+    "npm exec --package @openai/codex -- codex --yolo",
+    # command substitutions and subshells, closed where the shell closes them
+    'x=$(echo ")"; codex --yolo)', 'x="$(codex --yolo)"', "(codex --yolo)", "$(which sudo) codex --yolo",
+    "eval codex --yolo", "alias x=\"eval 'bash -c \\\"codex --yolo\\\"'\"",   # three levels of code inside code
+    "codex --yolo $(",   # a substitution that goes on to the next line
+    "codex --model x#1 --yolo",   # a # inside a word isn't a comment
+    "make build && codex --yolo", "sleep 1 & codex --yolo", "make || codex --yolo",
+])
+def test_every_wrapper_keyword_shell_and_runner_is_read_through(line):
+    assert ag.skip_flags(line) == [("codex", "--yolo")]
+
+
+@pytest.mark.parametrize("line,flags", [
+    ("codex -a=never -s=danger-full-access", [CODEX_PAIR]),
+    ("codex -c 'approval_policy = never' -c 'sandbox_mode = \"danger-full-access\"'", [CODEX_PAIR]),
+    ("gemini --yolo -y --approval-mode yolo", [("gemini", "--yolo"), ("gemini", "-y"), ("gemini", "--approval-mode yolo")]),
+    # twins: where the shell would read the line otherwise
+    ("echo `date` gemini -y", []),         # the second backtick closes the first
+    ('"\\gemini" --yolo', []),             # in double quotes, \g keeps its backslash: no such program
+    ("echo a\\; gemini -y", []),            # an escaped ; is a word, not the end of the command
+    ("echo ${HOME} gemini -y", []),        # a { inside a word doesn't start a command
+    ("alias x='codex # --yolo later'", []),
+    ("echo 'x; gemini -y'", []),
+    ("bash -- codex --yolo", []),          # bash runs a script named codex
+    ("zsh --no-rcs 'codex --yolo'", []),   # a script file of that name; a long option isn't -c
+    ("sh 'gemini -y'", []),
+    ("gemini -a never -s danger-full-access", []),
+    ("alias n=npm", []),
+    ("gemini --approval-mode", []),
+])
+def test_options_and_quoting_are_read_as_the_tools_and_shell_read_them(line, flags):
+    assert ag.skip_flags(line) == flags
+
+
+def test_an_option_left_without_its_value_doesnt_stop_the_check(home, monkeypatch):
+    """An option at the end of a line has no value to read. Through the scanner a crash on it would replace every
+    finding of the check with "Check couldn't run"."""
+    monkeypatch.setattr(scanner, "_home", lambda: home)
+    for name in ag.CRED_VARS + ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    write(home / ".bashrc", "alias g='gemini --approval-mode'\nalias c='codex -a'\nalias s='codex -s'\n"
+                            "alias x='codex --config'\nalias f='fish --command'\nalias b='bash -o'\n"
+                            "alias y='gemini --yolo'\n")
+    result = SentinelScanner(checks=["agent_safety"]).scan()
+    assert [(f.severity, f.details.get("line")) for f in result.findings] == [("medium", 7)]
+
+
+def test_the_name_of_an_alias_or_abbreviation_with_options_is_reported(home):
+    write(home / ".config" / "fish" / "config.fish",
+          "alias --save cx 'codex --yolo'\nalias -- cy='codex --yolo'\nabbr -a -p anywhere gz gemini -y\n")
+    assert [(f.details["name"], f.description.count("(abbreviation gz)")) for f in run(home)] == [
+        ("cx", 0), ("cy", 0), ("gz", 1)]
+
+
+def test_fish_aliases_abbreviations_and_wrapped_agents_are_reported_by_name(home):
+    """6d6abb4 found each of these; the command-position rule of 78ae22d found none."""
+    write(home / ".config" / "fish" / "config.fish",
+          "alias cx 'codex --yolo'\nabbr -a gy gemini --yolo\nalias ca 'codex -a never -s danger-full-access'\n")
+    write(home / ".bashrc", "alias g='GEMINI_API_KEY=$(secret-tool lookup service gemini) gemini -y'\n"
+                            "alias g2='\\gemini --yolo'\nalias cx='timeout 3600 codex --yolo'\n")
+    out = run(home)
+    assert sorted((Path(f.details["path"]).name, f.details["line"], f.severity, f.details["name"], f.details["flags"])
+                  for f in out) == [
+        (".bashrc", 1, "medium", "g", ["gemini -y"]), (".bashrc", 2, "medium", "g2", ["gemini --yolo"]),
+        (".bashrc", 3, "medium", "cx", ["codex --yolo"]), ("config.fish", 1, "medium", "cx", ["codex --yolo"]),
+        ("config.fish", 2, "medium", "gy", ["gemini --yolo"]),
+        ("config.fish", 3, "medium", "ca", ["codex --ask-for-approval never with --sandbox danger-full-access"])]
+    assert "(abbreviation gy)" in next(f for f in out if f.details["name"] == "gy").description
+
+
+@pytest.mark.parametrize("read,text", [
+    # ( and { each started another try over the rest of the word. Each input here took 8 s or more at 78ae22d
+    pytest.param(ag.skip_flags, "(" * 10000, id="parens"),
+    pytest.param(ag.skip_flags, "{" * 10000, id="braces"),
+    pytest.param(ag.skip_flags, "X=(" * 2100, id="assignments"),
+    # an unclosed ${NAME:- scanned on to the end of the line, once per occurrence
+    pytest.param(ag.credential_assignments, "${ANTHROPIC_API_KEY:-" * 4000, id="defaults"),
+    # from each -set, the flags after it were tried again
+    pytest.param(ag.credential_assignments, "set " + "-set " * 2500, id="fish-set"),
+    # \s* around a lazy name that can hold spaces
+    pytest.param(ag.toml_tables, "[" + " " * 1400 + "x", id="toml-header"),
+    # redact() on thousands of characters of a-a-a-
+    pytest.param(ag._looks_like_key, "a-" * 2500 + "a", id="redact"),
+    # code inside code is read a few levels deep, not once per eval
+    pytest.param(ag.skip_flags, "eval " * 5000 + "codex --yolo", id="evals"),
+])
+def test_text_built_to_be_slow_is_read_in_one_pass(read, text):
+    import time
+    start = time.time()
+    read(text)
+    assert time.time() - start < 2
+
+
+def test_slow_lines_in_a_shell_file_dont_slow_the_check(home):
+    import time
+    write(home / ".bashrc", "(" * 8000 + "\n" + "{" * 8000 + "\n" + "\\a" * 20000 + "\n" + "$(" * 8000 + "\n"
+          + "export CFG='[" + ",".join('{"k%d":"v%d"}' % (i, i) for i in range(800)) + "]'\n"
+          + 'export OPENAI_API_KEY="' + "a-" * 2000 + 'a"\n' + "alias c='codex --yolo'\n")
+    start = time.time()
+    assert [(f.severity, f.details["line"]) for f in run(home)] == [("info", 6), ("medium", 7)]
+    assert time.time() - start < 5
+
+
+@pytest.mark.parametrize("length,key", [(256, True), (257, False)])
+def test_a_long_placeholder_shaped_value_is_checked_for_a_token_up_to_256_characters(length, key):
+    # all lowercase with a dash, so it reads as a placeholder; redact() knows sk- as a key's start
+    assert ag._looks_like_key("sk-" + "a" * (length - 3)) is key
+
+
 DEEP = "[" * 100000 + "]" * 100000
 
 

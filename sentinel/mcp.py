@@ -246,9 +246,15 @@ def git_ls_file(path: Path):
 
 
 def _git_tracked(path: Path):
-    """True if git tracks the file, False if not (or it isn't in a repo), None if git couldn't be asked."""
+    """True if git tracks the file, False if not (or it isn't in a repo), None if git couldn't be asked: git isn't
+    there, or it refused or failed (a repository owned by another account is "dubious ownership", exit 128 too)."""
     answer = git_ls_file(path)
-    return None if answer is None else answer[0] == 0
+    if answer is None:
+        return None
+    code, error = answer
+    if code == 0:
+        return True
+    return False if code == 1 or code == 128 and "not a git repository" in error else None
 
 
 def _read_toml_servers(path: Path):

@@ -76,42 +76,46 @@ POWERSHELL_NAMES = POWERSHELL_RUNNERS + tuple(re.sub(r"^(\S+)", r"\1.exe", n) fo
 SHELL_RULE = re.compile(r"^\s*(Bash|Shell|PowerShell)\s*(?:\((.*)\))?\s*$", re.S)
 
 
-def _command(*names: str) -> str:
-    """A regex for one of the names run as a command: at the start of one (after ;, &, |, (, {, ` or alias x=), or
-    after a wrapper such as sudo, env or npx, with variable assignments and flags before it; a path to it counts. Not
-    another command's argument (conda install gemini -y) or part of a longer name (gemini-api). A word here stops at
-    the next ; & | or `, where the next command starts, unless it's quoted (X='a b'), so a long line costs one pass,
-    not one per separator."""
-    word = r"[^\s;&|`]"
-    value = r"""(?:'[^']*'|"[^"]*"|[^\s;&|`'"])*"""
-    return (r"(?:^|[;&|({`]|\balias\s+(?:-\w+\s+)*[\w.:+-]+=|"
-            r"\b(?:sudo|env|command|exec|nohup|time|nice|then|do|else|npx|pnpx|bunx|dlx)\s)"
-            r"\s*(?:[\"']\s*)?(?:(?:\w+=%s|-%s+)\s+)*(?:%s*/)?(?:%s)(?![\w.-])"
-            % (value, word, word, "|".join(names)))
-
-
-CODEX = _command("codex")
-GEMINI = _command("gemini", "gemini-cli")   # npx @google/gemini-cli
-# Launch flags that switch an agent's prompts off. The Claude and Codex long flags are their own; --yolo, -y and the
-# mode flags count only after the agent's name, in the same command.
+# Launch flags that switch an agent's prompts off. Claude's and Codex's long flags are their own, so they count
+# wherever they're written. --yolo, -y and the mode flags count only as the arguments of codex or gemini run as a
+# command (see _launches), not in another command's arguments (conda install gemini -y) or in a message.
 AGENT_FLAGS = (
     ("claude", "--dangerously-skip-permissions", re.compile(r"(?<![\w-])--dangerously-skip-permissions(?![\w-])")),
     ("claude", "--permission-mode bypassPermissions",
      re.compile(r"(?<![\w-])--(?:permission-)?mode(?:=|\s+)[\"']?bypassPermissions\b")),
     ("codex", "--dangerously-bypass-approvals-and-sandbox",
      re.compile(r"(?<![\w-])--dangerously-bypass-approvals-and-sandbox(?![\w-])")),
-    ("codex", "--yolo", re.compile(CODEX + r"[^;&|]*?(?<![\w-])--yolo(?![\w-])")),
-    ("gemini", "--yolo", re.compile(GEMINI + r"[^;&|]*?(?<![\w-])--yolo(?![\w-])")),
-    ("gemini", "-y", re.compile(GEMINI + r"[^;&|]*?(?<![\w-])-y(?![\w-])")),
-    ("gemini", "--approval-mode yolo", re.compile(GEMINI + r"[^;&|]*?(?<![\w-])--approval-mode(?:=|\s+)[\"']?yolo\b")),
 )
-# Codex never asking AND running without a sandbox, given as two flags (either alone keeps a safeguard), or as -c
-# overrides of the config.toml keys (codex -c approval_policy=never)
-CODEX_NEVER = re.compile(CODEX + r"[^;&|]*?(?<![\w-])(?:(?:-a|--ask-for-approval)(?:=|\s+)[\"']?|"
-                         r"(?:-c|--config)(?:=|\s+)[\"']?approval_policy\s*=\s*[\"']?)never\b")
-CODEX_NO_SANDBOX = re.compile(CODEX + r"[^;&|]*?(?<![\w-])(?:(?:-s|--sandbox)(?:=|\s+)[\"']?|"
-                              r"(?:-c|--config)(?:=|\s+)[\"']?sandbox_mode\s*=\s*[\"']?)danger-full-access\b")
-ALIAS_NAME = re.compile(r"^\s*(?:alias\s+(?:-\w+\s+)*([\w.:+-]+)|function\s+([\w.:+-]+)|([\w.:+-]+)\s*\(\s*\))")
+CODEX_PAIR = ("codex", "--ask-for-approval never with --sandbox danger-full-access")
+# The order flags are listed in a finding
+FLAG_ORDER = tuple((agent, flag) for agent, flag, _ in AGENT_FLAGS) + (
+    ("codex", "--yolo"), ("gemini", "--yolo"), ("gemini", "-y"), ("gemini", "--approval-mode yolo"), CODEX_PAIR)
+AGENT_NAMES = (("codex", ("codex",)), ("gemini", ("gemini", "gemini-cli")))   # npx @google/gemini-cli
+# Words that run the command after them, each with its options that take the next word as their value, and how many
+# words it takes before the command (timeout's duration): sudo -u root codex, nice -n 5 gemini, timeout 1h codex.
+WRAPPERS = {name: (frozenset(takes.split()), before) for name, takes, before in (
+    ("sudo", "-u -g -h -p -r -t -C -D -R -T -U --user --group --host --prompt --role --type --close-from --chdir "
+             "--chroot --command-timeout --other-user", 0),
+    ("doas", "-u -C", 0), ("env", "-u -C -S --unset --chdir --split-string", 0), ("command", "", 0),
+    ("builtin", "", 0), ("exec", "-a", 0), ("nohup", "", 0), ("noglob", "", 0), ("nocorrect", "", 0),
+    ("time", "-f -o --format --output", 0), ("nice", "-n --adjustment", 0), ("ionice", "-c -n --class --classdata", 0),
+    ("timeout", "-k -s --kill-after --signal", 1), ("stdbuf", "-i -o -e --input --output --error", 0),
+    ("caffeinate", "-t -w", 0), ("unbuffer", "", 0), ("watch", "-n --interval", 0),
+    ("xargs", "-a -d -E -I -L -n -P -s --arg-file --delimiter --max-lines --max-args --max-procs --max-chars "
+              "--process-slot-var", 0),
+    ("npx", "-p --package", 0), ("pnpx", "-p --package", 0), ("bunx", "-p --package", 0),
+    ("uvx", "-p -w --from --with --with-editable --with-requirements --python --index --index-url "
+            "--extra-index-url", 0))}
+# Package runners named in two words: npm exec, pnpm dlx, yarn dlx, bun x
+RUNNERS = {"npm": ("exec", "x"), "pnpm": ("dlx", "exec"), "yarn": ("dlx", "exec"), "bun": ("x",)}
+# Words of the shell's own (bash, zsh, fish) after which a command starts
+SHELL_KEYWORDS = ("if", "then", "else", "elif", "do", "while", "until", "!", "coproc", "and", "or", "not", "begin")
+SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "fish")
+# fish's abbr options that take the next word as their value
+ABBR_TAKES = ("-p", "--position", "-r", "--regex", "-c", "--command")
+ASSIGNMENT = re.compile(r"[A-Za-z_]\w*\+?=")
+ALIAS_NAME = re.compile(r"^\s*(?:alias\s+(?:-\S*\s+)*([\w.:+-]+)|function\s+([\w.:+-]+)|([\w.:+-]+)\s*\(\s*\)|"
+                        r"abbr\s+(?:(?:%s)\s+\S+\s+|-\S*\s+)*([\w.:+-]+))" % "|".join(ABBR_TAKES))
 # A long value that's still a placeholder: words joined by _ - or . in one case (your_api_key_here, YOUR-KEY-HERE),
 # one character repeated (xxxxxxxx), a <hole>, or an ellipsis
 PLACEHOLDER = re.compile(r"^(?:[a-z]+(?:[_.-][a-z]+)+|[A-Z]+(?:[_.-][A-Z]+)+|(.)\1*)$|[<>]|\.\.\.")
@@ -351,7 +355,9 @@ def toml_tables(text: str) -> dict:
             continue
         if not line or line.startswith("#"):
             continue
-        header = re.match(r"^\[\[?\s*([^\[\]]+?)\s*\]\]?\s*(?:#.*)?$", line)
+        # one way to read each character (_key_parts strips the spaces): \s* around a lazy name that can also hold
+        # spaces took 31 s on a [ and 2,000 spaces
+        header = re.match(r"^\[\[?([^\[\]]+)\]\]?\s*(?:#.*)?$", line)
         if header:
             current = ".".join(_key_parts(header.group(1)))
             tables.setdefault(current, {})
@@ -531,12 +537,217 @@ def _code(line: str) -> str:
     return line if comment is None else line[:comment]
 
 
+def _commands(text: str) -> list:
+    """Each simple command in a line of shell or fish code, as its words with quotes and escapes taken off, as the
+    shell reads them. A command ends at ; & | and at ( ) and a word-initial { or }; $(...), (...) and `...` hold
+    commands of their own, read the same way. What one puts into a word isn't known, so it adds nothing to it. A #
+    that starts a word starts a comment. One pass, with a stack rather than recursion, however deep the nesting."""
+    out, stack = [], []
+    words, word, quote, closer = [], None, None, None   # word: its characters so far, or None between words
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        i += 1
+        if c == "`" and closer == "`" or c == ")" and closer == ")" and quote is None:
+            if word is not None:   # the end of a command substitution: back to the command it's in
+                words.append("".join(word))
+            if words:
+                out.append(words)
+            words, word, quote, closer = stack.pop()
+            word = [] if word is None else word
+        elif quote == "'":
+            if c == "'":
+                quote = None
+            else:
+                word.append(c)
+        elif c == "\\":
+            word = [] if word is None else word
+            if quote == '"' and text[i:i + 1] not in ("$", "`", '"', "\\"):
+                word.append(c)   # inside double quotes a backslash escapes only these
+            else:
+                word.append(text[i:i + 1])
+                i += 1
+        elif c == "`" or c == "(" and (quote is None or text[i - 2:i - 1] == "$"):
+            if c == "(" and word and word[-1] == "$":
+                word.pop()   # the $ of $( is the substitution's
+            stack.append((words, word, quote, closer))
+            words, word, quote, closer = [], None, None, ")" if c == "(" else "`"
+        elif quote == '"':
+            if c == '"':
+                quote = None
+            else:
+                word.append(c)
+        elif c in "'\"":
+            word, quote = [] if word is None else word, c
+        elif c == "#" and word is None:
+            break
+        elif c.isspace() or c in ";&|)" or c in "{}" and word is None:
+            if word is not None:
+                words.append("".join(word))
+                word = None
+            if not c.isspace() and words:
+                out.append(words)
+                words = []
+        else:
+            word = [] if word is None else word
+            word.append(c)
+    while True:
+        if word is not None:
+            words.append("".join(word))
+        if words:
+            out.append(words)
+        if not stack:
+            return out
+        words, word, quote, closer = stack.pop()
+        word = [] if word is None else word
+
+
+def _program(word: str) -> str:
+    """The program a command word names: its file name, without an npm version (@openai/codex@0.1 -> codex)."""
+    name = word.rsplit("/", 1)[-1]
+    return name.split("@", 1)[0]
+
+
+def _skip_options(words: list, i: int, takes=()) -> int:
+    """The index of the first word from i on that isn't an option (- and -- included) or the value of one in takes."""
+    while i < len(words) and words[i][:1] == "-":
+        i += 2 if words[i] in takes else 1
+    return i
+
+
+def _alias_bodies(args: list) -> list:
+    """The code each alias defined by an alias command stands for: NAME=VALUE (bash, zsh, fish), or fish's
+    alias NAME DEFINITION..., whose words fish joins with spaces."""
+    args = args[_skip_options(args, 0):]
+    if args and "=" not in args[0]:
+        return [" ".join(args[1:])]
+    return [a.split("=", 1)[1] for a in args if "=" in a]
+
+
+def _abbr_body(args: list) -> list:
+    """The expansion of a fish abbreviation, abbr [-a] [options] NAME EXPANSION..., its words joined with spaces as
+    fish joins them. A line that erases, lists or renames one leaves nothing a command could be read from."""
+    name = _skip_options(args, 0, ABBR_TAKES)
+    return [" ".join(args[_skip_options(args, name + 1, ABBR_TAKES):])]   # options can follow the name too
+
+
+def _shell_string(args: list):
+    """The code a shell is given to run (bash -c '...', -lc, fish -c or --command=...), or None."""
+    command, i = False, 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("--command="):
+            return a[len("--command="):]
+        if a == "--command":
+            return args[i + 1] if i + 1 < len(args) else None
+        if a in ("-o", "+o", "-O", "+O"):   # set -o and shopt names
+            i += 2
+        elif a[:2] == "--":   # a long option, or -- itself
+            i += 1
+        elif a[:1] in ("-", "+") and len(a) > 1:
+            command = command or "c" in a
+            i += 1
+        else:
+            return a if command else None
+    return None
+
+
+def _command_run(words: list):
+    """What one simple command runs: (agent, its arguments) for codex or gemini, after any variable assignments,
+    shell keywords and wrappers (sudo -u root, timeout 1h, npx -y, bun x); else (None, the code it holds for the shell
+    to read: an alias's body, an abbreviation's expansion, eval's words or sh -c's string)."""
+    i, n = 0, len(words)
+    while i < n:
+        w = words[i]
+        name = _program(w)
+        if ASSIGNMENT.match(w) or w in SHELL_KEYWORDS or not w:   # not w: a $(...) of its own, which may be empty
+            i += 1
+        elif name in WRAPPERS:
+            takes, before = WRAPPERS[name]
+            i = _skip_options(words, i + 1, takes) + before
+        elif name in RUNNERS and i + 1 < n and words[i + 1] in RUNNERS[name]:
+            i = _skip_options(words, i + 2, WRAPPERS["npx"][0])
+        else:
+            break
+    if i >= n:
+        return None, []
+    name, args = _program(words[i]), words[i + 1:]
+    for agent, names in AGENT_NAMES:
+        if name in names:
+            return agent, args
+    if name == "alias":
+        return None, _alias_bodies(args)
+    if name == "abbr":
+        return None, _abbr_body(args)
+    if name == "eval":
+        return None, [" ".join(args)]
+    if name in SHELLS:
+        string = _shell_string(args)
+        return None, [] if string is None else [string]
+    return None, []
+
+
+def _launches(code: str) -> list:
+    """(agent, its arguments) for each run of codex or gemini in a line of shell or fish code, as a command (see
+    _command_run) or in code an alias, abbreviation, eval or sh -c holds, read up to three levels deep. Each level reads
+    parts of the one before, so the whole costs a few passes over the line."""
+    found, todo = [], [(code, 0)]
+    while todo:
+        text, depth = todo.pop()
+        for words in _commands(text):
+            agent, rest = _command_run(words)
+            if agent:
+                found.append((agent, rest))
+            elif depth < 3:
+                todo += [(inner, depth + 1) for inner in rest]
+    return found
+
+
+def _option(args: list, i: int, short: str, long: str):
+    """The value args[i] gives an option: -a never, -a=never, -anever, --ask-for-approval never or
+    --ask-for-approval=never (short may be ""); None when args[i] isn't that option."""
+    a = args[i]
+    if a == long or short and a == short:
+        return args[i + 1] if i + 1 < len(args) else ""
+    if a.startswith(long + "="):
+        return a[len(long) + 1:]
+    if short and a.startswith(short):
+        return a[len(short):].lstrip("=")
+    return None
+
+
+def _agent_flags(agent: str, args: list) -> list:
+    """(agent, flag) for each of a codex or gemini command's arguments, up to a --, that switch its prompts off. Codex
+    counts only when it's told both never to ask and to run without a sandbox (either alone keeps a safeguard), by
+    flags or by -c overrides of the config.toml keys (codex -c approval_policy=never)."""
+    out, never, unsandboxed = [], False, False
+    for i, a in enumerate(args):
+        if a == "--":
+            break
+        if a == "--yolo" or agent == "gemini" and a in ("-y", "--yolo=true"):
+            out.append((agent, a.split("=")[0]))
+        if agent == "gemini":
+            if "yolo" in (_option(args, i, "", "--approval-mode"), _option(args, i, "", "--approvalMode")):
+                out.append(("gemini", "--approval-mode yolo"))
+            continue
+        config = _option(args, i, "-c", "--config")
+        key, _, value = (config or "").partition("=")
+        setting = (key.strip(), value.strip().strip("\"'"))
+        never = never or _option(args, i, "-a", "--ask-for-approval") == "never" or setting == (
+            "approval_policy", "never")
+        unsandboxed = unsandboxed or _option(args, i, "-s", "--sandbox") == "danger-full-access" or setting == (
+            "sandbox_mode", "danger-full-access")
+    if never and unsandboxed:
+        out.append(CODEX_PAIR)
+    return out
+
+
 def skip_flags(code: str) -> list:
     """(agent, flag) for each launch flag in one shell line that switches an agent's prompts off."""
-    found = [(agent, flag) for agent, flag, pattern in AGENT_FLAGS if pattern.search(code)]
-    if CODEX_NEVER.search(code) and CODEX_NO_SANDBOX.search(code):
-        found.append(("codex", "--ask-for-approval never with --sandbox danger-full-access"))
-    return found
+    found = set((agent, flag) for agent, flag, pattern in AGENT_FLAGS if pattern.search(code))
+    for agent, args in _launches(code):
+        found.update(_agent_flags(agent, args))
+    return [f for f in FLAG_ORDER if f in found]
 
 
 def credential_assignments(code: str) -> list:
@@ -548,10 +759,12 @@ def credential_assignments(code: str) -> list:
     for name in CRED_VARS:
         for m in re.finditer(r"(?<![\w$])%s=(\"[^\"]*\"|'[^']*'|[^\s;&|)}`'\"]*)" % name, code):
             out.append((name, m.group(1)))
-        for m in re.finditer(r"\$\{%s(?::?-|:=)([^}]*)\}" % name, code):
+        # a default holding a $ comes from elsewhere (_literal); stopping at one keeps a line of unclosed ${NAME:-
+        # to one pass. And set is a word of its own: from -set, each of a run of flags would start another try.
+        for m in re.finditer(r"\$\{%s(?::?-|:=)([^}$]*)\}" % name, code):
             if _looks_like_key(_literal(m.group(1))):
                 out.append((name, m.group(1)))
-        for m in re.finditer(r"\bset\s+(?:-\S*\s+)*%s\b(?:\s+(\"[^\"]*\"|'[^']*'|[^\s;&|]+))?" % name, code):
+        for m in re.finditer(r"(?<![\w-])set\s+(?:-\S*\s+)*%s\b(?:\s+(\"[^\"]*\"|'[^']*'|[^\s;&|]+))?" % name, code):
             out.append((name, m.group(1) or ""))
     return out
 
@@ -580,10 +793,13 @@ def _literal(value: str) -> str:
 def _looks_like_key(value: str) -> bool:
     """A real key or token rather than a placeholder: shaped like a known token (sentinel/redact.py), or 20 characters
     or more that aren't a placeholder like your_api_key_here (PLACEHOLDER). A short value such as "ollama", which local
-    model servers ask for, isn't one; every agent key format Sereno knows is longer."""
-    if redact(value) != value:
+    model servers ask for, isn't one; every agent key format Sereno knows is longer. redact() takes seconds on a few
+    thousand characters of some shapes (a-a-a-...), so it's asked only about what the length rule leaves open (under
+    20 characters, or shaped like a placeholder), up to 256 characters: a real token has digits or capitals, which no
+    placeholder shape allows, so a long one never gets that far."""
+    if len(value) >= 20 and not PLACEHOLDER.search(value):
         return True
-    return len(value) >= 20 and not PLACEHOLDER.search(value)
+    return len(value) <= 256 and redact(value) != value
 
 
 def _credential_finding(finding, name: str, value: str, path: Path, line, remove: str = None):
@@ -627,8 +843,8 @@ def _commented_key_finding(finding, name: str, path: Path, line: int):
 
 def _flag_finding(finding, path: Path, lineno: int, code: str, flags: list):
     m = ALIAS_NAME.match(code)
-    kind, name = (("alias", m.group(1)) if m and m.group(1) else
-                  ("function", m.group(2) or m.group(3)) if m else (None, None))
+    kind, name = next(((kind, m.group(g)) for g, kind in ((1, "alias"), (2, "function"), (3, "function"),
+                                                          (4, "abbreviation")) if m and m.group(g)), (None, None))
     shown = ", ".join("%s %s" % f for f in flags)
     agents = " and ".join(sorted(set(agent for agent, _ in flags)))
     where = "%s:%d" % (path, lineno)

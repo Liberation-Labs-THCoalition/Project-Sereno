@@ -210,7 +210,7 @@ NPM_COMPROMISED_STEPS = (
 def _npm_version(pkg: Path) -> str:
     try:
         return str(json.loads((pkg / "package.json").read_text()).get("version", "unknown"))
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):   # RecursionError: JSON nested too deep to parse
         return "unknown"
 
 

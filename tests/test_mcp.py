@@ -174,6 +174,27 @@ def test_with_no_git_to_run_the_finding_says_git_couldnt_be_asked(home, monkeypa
     assert out[0].details["git_tracked"] is None and "couldn't ask git" in out[0].description
 
 
+@pytest.mark.parametrize("answer,tracked", [
+    ((0, ""), True),
+    ((1, "error: pathspec '.mcp.json' did not match any file(s) known to git\n"), False),
+    ((128, "fatal: not a git repository (or any of the parent directories): .git\n"), False),
+    ((128, "fatal: detected dubious ownership in repository at '/srv/x'\n"), None),   # git refused to say
+    ((129, "usage: git ls-files"), None),
+    (None, None),
+])
+def test_only_gits_own_answers_say_tracked_or_not(monkeypatch, tmp_path, answer, tracked):
+    monkeypatch.setattr(mcp, "git_ls_file", lambda path: answer)
+    assert mcp._git_tracked(tmp_path / ".mcp.json") is tracked
+
+
+def test_a_repository_git_refuses_to_read_is_said_so(home, monkeypatch):
+    write(home / ".claude.json", {"mcpServers": {"gh": {"command": "node", "env": {"GITHUB_TOKEN": TOKEN}}}})
+    monkeypatch.setattr(mcp, "git_ls_file",
+                        lambda path: (128, "fatal: detected dubious ownership in repository at '%s'\n" % home))
+    out = mcp.check_mcp_servers(make, home)
+    assert out[0].details["git_tracked"] is None and "couldn't ask git" in out[0].description
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 def test_git_is_asked_about_that_one_file_whatever_its_name(tmp_path):
     """A name git could read as a pattern (*.json) or an option (-x.json) is asked about as the file itself."""
