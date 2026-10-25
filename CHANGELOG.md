@@ -2,6 +2,39 @@
 
 What changed in Sereno, in plain words. Newest first. To get the changes, run `git pull` in your Project-Sereno folder.
 
+## 2026-10-24
+
+- **Network check: every port, named.** Each listening port, TCP and UDP, now shows the program behind it and the
+  program's file where Sereno can see them, and known services are named: "remote desktop (gnome-remote-desktop) on
+  port 3390" instead of "unexpected listening port 3390". Each finding says how it knew: by the program, by its systemd
+  unit, or by the port alone ("likely ..."). A port whose program can't be seen without sudo says so, and is still
+  reported. (151d520, 7ba1698, 09d8dd1, 66ec1b7, 8ff2256, f6df868)
+  - Remote control that other machines can reach (a remote desktop such as RDP, VNC, NoMachine, RustDesk, AnyDesk or
+    TeamViewer, or SSH on a port other than 22) is now high on any TCP port, with the command that switches it off
+    and the one that undoes it. SSH on port 22 isn't reported, as before.
+  - Tailscale's own listeners on your tailnet addresses are info, recognised when `tailscale status --json` lists them
+    as this machine's peer API, or when they belong to root's `tailscaled`.
+  - If Sereno can't list the ports at all, it says "Listening ports not checked" (medium) instead of nothing. Without
+    `ss`, it reads `/proc/net` directly.
+  - On macOS, the system's own listeners are listed too (from `netstat`), and a connected UDP socket is no longer
+    mistaken for a listening port.
+  - After review: a program can't pass itself off as root's `tailscaled` by naming a helper "uid:0" (Sereno reads
+    the owner only from the fields after the program names). Docker's published port 4000 is "Docker", not "likely
+    NoMachine": a unit the system made outranks the port. A unit a user named `cups.service` no longer calls their
+    port printing. An SSH login's forwarded port (`ssh -R`) is "SSH reverse tunnel", medium, with no advice to stop
+    an SSH server. TightVNC, Xvnc4, RealVNC's virtual desktops, xpra, Sunshine and Guacamole are named as remote
+    desktops. GNOME's VNC off a 5900 port gets the VNC command, not RDP's. A socket bound to the loopback device is
+    this machine only. Run as root, a socket with no program is no longer called "the kernel's" outright. On macOS,
+    netstat failing is "partly checked", not silence. One byte that isn't UTF-8 in a command's output, a program's
+    name or a program's folder no longer stops the whole check or the printed report. A second SSH server that a root
+    login started is "SSH server", high, not a tunnel, and stays high after the SSH service restarts or when inetd
+    starts sshd: Sereno now tells the listening SSH server by the sockets it holds, not by its parent's name. A port
+    forwarded through a login to a second SSH server is a tunnel, medium, not a server. Run as root, the step for a
+    socket a user's own systemd holds names that user.
+  - Never read: a program's command line, which can hold passwords.
+- **Notes are printed.** A scan with nothing but notes said "7 notes below, for your information:" and then printed
+  none of them. They're listed now. (69c4073)
+
 ## 2026-10-23
 
 - **Honest results.** What Sereno says now matches what it checked. (b80e1f2)

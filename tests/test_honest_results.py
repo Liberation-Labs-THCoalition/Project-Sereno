@@ -115,6 +115,12 @@ class TestNotesAreNotIssues:
         assert "No issues found. 1 note below, for your information:" in report
         assert "looks clean" not in report
 
+    def test_the_notes_below_are_printed(self):
+        """2026-10-24: "7 notes below" was followed by nothing, because only the issues branch printed findings."""
+        report = _result("info", "info").human_report()
+        assert report.count("[.] info thing") == 2
+        assert report.index("2 notes below") < report.index("[.] info thing")
+
     def test_report_counts_issues_and_notes_apart(self):
         assert "1 issue found, and 2 notes:" in _result("high", "info", "info").human_report()
         assert "2 issues found:" in _result("critical", "medium").human_report()
