@@ -9,12 +9,14 @@ works in it. And the agents' logins are worth stealing: a CLAUDE_CODE_OAUTH_TOKE
 What's reported:
 - medium (advice): prompts turned off in your own settings or shell files, with what that means and how to turn the
   prompt back on. An administrator's managed settings count as advice too, and so does a project's
-  .claude/settings.local.json that git doesn't track, because Claude Code treats that file as yours.
-- high: a project folder's Claude Code settings that switch prompts off (a repo someone else wrote can do this); an
-  agent login file that other accounts can read; an agent API key or token written into a shell startup file or into
-  your Claude Code settings.
-- info: an agent credential set in the environment Sereno runs in (that's how people run agents); a short value that
-  looks like a placeholder; a file Sereno couldn't read, so it wasn't checked.
+  .claude/settings.local.json that git says it doesn't track, because that's where Claude Code saves your "don't ask
+  again" answers.
+- high: a project folder's Claude Code settings that switch prompts off (a repo someone else wrote can do this),
+  including a settings.local.json git can't vouch for (the folder isn't a repository, as a download isn't); an agent
+  login file that other accounts can read; an agent API key or token written into a shell startup file or into your
+  Claude Code settings.
+- info: an agent credential set in the environment Sereno runs in (that's how people run agents); a value that looks
+  like a placeholder; a key left in a commented-out line; a file Sereno couldn't read, so it wasn't checked.
 
 A secret's value never goes into a finding: variables are named, never shown, and shell lines aren't quoted. Login
 files are never opened; only their permissions are read. Read-only, local, standard library only.
@@ -28,7 +30,7 @@ import stat
 from pathlib import Path
 
 from .claude_settings import known_projects, project_files
-from .mcp import _git_tracked, strip_jsonc
+from .mcp import git_ls_file, strip_jsonc
 from .redact import redact
 
 # Agent credentials people put in shell files. Claude Code reads the first three (the OAuth token that
@@ -36,8 +38,12 @@ from .redact import redact
 CRED_VARS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "GEMINI_API_KEY")
 SHELL_FILES = (".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".profile", ".zshrc", ".zprofile", ".zshenv",
                ".config/fish/config.fish")
-# fish keeps more config in conf.d, and its `alias --save` and `funcsave` write to functions/
-FISH_DIRS = (".config/fish/conf.d", ".config/fish/functions")
+# Folders whose files the shell reads at startup: fish's conf.d, and functions/ where `alias --save` and `funcsave`
+# write; ~/.bashrc.d, whose every file Fedora's .bashrc sources; oh-my-zsh's custom/*.zsh.
+SHELL_DIRS = ((".config/fish/conf.d", "*.fish"), (".config/fish/functions", "*.fish"), (".bashrc.d", "*"),
+              (".oh-my-zsh/custom", "*.zsh"))
+# fish's universal variables (set -U, set -Ux), kept in plain text: SETUVAR [--export] NAME:value, with \xHH escapes
+FISH_UNIVERSAL = Path(".config") / "fish" / "fish_variables"
 MANAGED_FILES = (Path("/etc/claude-code/managed-settings.json"),
                  Path("/Library/Application Support/ClaudeCode/managed-settings.json"))
 VSCODE_FILES = (Path(".config") / "Code" / "User" / "settings.json",
@@ -51,10 +57,41 @@ VSCODE_AUTO_APPROVE = ("chat.tools.global.autoApprove", "chat.tools.autoApprove"
 # (doesToolInvocationMatch in packages/core/src/utils/tool-utils.ts). Narrow on purpose: an entry naming a command is
 # someone's chosen list.
 GEMINI_SHELL_TOOLS = ("run_shell_command", "ShellTool")
-# A Claude Code permissions.allow rule that lets every shell command through: a bare tool name or a lone wildcard. The
-# docs say `Bash(*)` equals `Bash`, `:*` is a trailing wildcard, and PowerShell rules work the same way; "Shell" is in
-# the settings reference's own example. A rule naming a command isn't reported.
-BROAD_SHELL_RULE = re.compile(r"^\s*(?:Bash|Shell|PowerShell)\s*(?:\(\s*:?\*\s*\)|\s\*)?\s*$")
+# Claude Code permissions.allow rules that let every shell command through. A bare tool name, or nothing but wildcards
+# (the docs say `Bash(*)` equals `Bash` and `:*` is a trailing wildcard; "Shell" is in the settings reference's own
+# example). Or a program that runs whatever it's given (python3 -c, sh -c, env, xargs), alone or with a wildcard:
+# Bash(python3:*) lets any command through as surely as Bash does. The programs are Claude Code's own list (2.1.309:
+# the allow rules its auto mode won't trust), compared without case; PowerShell's adds Windows launchers, each also by
+# its .exe name. A rule naming a command, such as Bash(git:*) or Bash(npm run test *), isn't reported.
+SHELL_RUNNERS = ("python", "python3", "python2", "node", "deno", "tsx", "ruby", "perl", "php", "lua", "npx", "bunx",
+                 "npm run", "yarn run", "pnpm run", "bun run", "bash", "sh", "ssh")
+BASH_RUNNERS = SHELL_RUNNERS + ("zsh", "fish", "eval", "exec", "env", "xargs", "sudo")
+POWERSHELL_RUNNERS = SHELL_RUNNERS + (
+    "pwsh", "powershell", "cmd", "wsl", "iex", "invoke-expression", "icm", "invoke-command", "start-process", "saps",
+    "start", "start-job", "sajb", "start-threadjob", "invoke-wmimethod", "iwmi", "invoke-cimmethod", "icim", "wmic",
+    "register-objectevent", "register-engineevent", "register-wmievent", "register-scheduledjob", "new-pssession",
+    "nsn", "enter-pssession", "etsn", "add-type", "new-object")
+# PowerShell's rules also count a program by its .exe name (python.exe, npm.exe run)
+POWERSHELL_NAMES = POWERSHELL_RUNNERS + tuple(re.sub(r"^(\S+)", r"\1.exe", n) for n in POWERSHELL_RUNNERS)
+SHELL_RULE = re.compile(r"^\s*(Bash|Shell|PowerShell)\s*(?:\((.*)\))?\s*$", re.S)
+
+
+def _command(*names: str) -> str:
+    """A regex for one of the names run as a command: at the start of one (after ;, &, |, (, {, ` or alias x=), or
+    after a wrapper such as sudo, env or npx, with variable assignments and flags before it; a path to it counts. Not
+    another command's argument (conda install gemini -y) or part of a longer name (gemini-api). A word here stops at
+    the next ; & | or `, where the next command starts, unless it's quoted (X='a b'), so a long line costs one pass,
+    not one per separator."""
+    word = r"[^\s;&|`]"
+    value = r"""(?:'[^']*'|"[^"]*"|[^\s;&|`'"])*"""
+    return (r"(?:^|[;&|({`]|\balias\s+(?:-\w+\s+)*[\w.:+-]+=|"
+            r"\b(?:sudo|env|command|exec|nohup|time|nice|then|do|else|npx|pnpx|bunx|dlx)\s)"
+            r"\s*(?:[\"']\s*)?(?:(?:\w+=%s|-%s+)\s+)*(?:%s*/)?(?:%s)(?![\w.-])"
+            % (value, word, word, "|".join(names)))
+
+
+CODEX = _command("codex")
+GEMINI = _command("gemini", "gemini-cli")   # npx @google/gemini-cli
 # Launch flags that switch an agent's prompts off. The Claude and Codex long flags are their own; --yolo, -y and the
 # mode flags count only after the agent's name, in the same command.
 AGENT_FLAGS = (
@@ -63,15 +100,21 @@ AGENT_FLAGS = (
      re.compile(r"(?<![\w-])--(?:permission-)?mode(?:=|\s+)[\"']?bypassPermissions\b")),
     ("codex", "--dangerously-bypass-approvals-and-sandbox",
      re.compile(r"(?<![\w-])--dangerously-bypass-approvals-and-sandbox(?![\w-])")),
-    ("codex", "--yolo", re.compile(r"\bcodex\b[^;&|]*?(?<![\w-])--yolo(?![\w-])")),
-    ("gemini", "--yolo", re.compile(r"\bgemini\b[^;&|]*?(?<![\w-])--yolo(?![\w-])")),
-    ("gemini", "-y", re.compile(r"\bgemini\b[^;&|]*?(?<![\w-])-y(?![\w-])")),
-    ("gemini", "--approval-mode yolo", re.compile(r"\bgemini\b[^;&|]*?(?<![\w-])--approval-mode(?:=|\s+)[\"']?yolo\b")),
+    ("codex", "--yolo", re.compile(CODEX + r"[^;&|]*?(?<![\w-])--yolo(?![\w-])")),
+    ("gemini", "--yolo", re.compile(GEMINI + r"[^;&|]*?(?<![\w-])--yolo(?![\w-])")),
+    ("gemini", "-y", re.compile(GEMINI + r"[^;&|]*?(?<![\w-])-y(?![\w-])")),
+    ("gemini", "--approval-mode yolo", re.compile(GEMINI + r"[^;&|]*?(?<![\w-])--approval-mode(?:=|\s+)[\"']?yolo\b")),
 )
-# Codex never asking AND running without a sandbox, given as two flags (either alone keeps a safeguard)
-CODEX_NEVER = re.compile(r"\bcodex\b[^;&|]*?(?<![\w-])(?:-a|--ask-for-approval)(?:=|\s+)[\"']?never\b")
-CODEX_NO_SANDBOX = re.compile(r"\bcodex\b[^;&|]*?(?<![\w-])(?:-s|--sandbox)(?:=|\s+)[\"']?danger-full-access\b")
+# Codex never asking AND running without a sandbox, given as two flags (either alone keeps a safeguard), or as -c
+# overrides of the config.toml keys (codex -c approval_policy=never)
+CODEX_NEVER = re.compile(CODEX + r"[^;&|]*?(?<![\w-])(?:(?:-a|--ask-for-approval)(?:=|\s+)[\"']?|"
+                         r"(?:-c|--config)(?:=|\s+)[\"']?approval_policy\s*=\s*[\"']?)never\b")
+CODEX_NO_SANDBOX = re.compile(CODEX + r"[^;&|]*?(?<![\w-])(?:(?:-s|--sandbox)(?:=|\s+)[\"']?|"
+                              r"(?:-c|--config)(?:=|\s+)[\"']?sandbox_mode\s*=\s*[\"']?)danger-full-access\b")
 ALIAS_NAME = re.compile(r"^\s*(?:alias\s+(?:-\w+\s+)*([\w.:+-]+)|function\s+([\w.:+-]+)|([\w.:+-]+)\s*\(\s*\))")
+# A long value that's still a placeholder: words joined by _ - or . in one case (your_api_key_here, YOUR-KEY-HERE),
+# one character repeated (xxxxxxxx), a <hole>, or an ellipsis
+PLACEHOLDER = re.compile(r"^(?:[a-z]+(?:[_.-][a-z]+)+|[A-Z]+(?:[_.-][A-Z]+)+|(.)\1*)$|[<>]|\.\.\.")
 
 
 # ── Reading files ──
@@ -98,6 +141,30 @@ def _config_dirs(default: Path, override) -> list:
 
 # ── Claude Code settings ──
 
+def broad_shell_rule(rule: str) -> bool:
+    """Whether a Claude Code permissions.allow rule lets any shell command through (see SHELL_RUNNERS)."""
+    m = SHELL_RULE.match(rule)
+    if not m:
+        return False
+    if m.group(2) is None:
+        return True
+    bare = re.sub(r"\s+", "", m.group(2))
+    if set(bare[:-2] if bare.endswith(":*") else bare) <= {"*"}:   # Bash(), Bash(*), Bash(:*), Bash(**), Bash(*:*)
+        return True
+    words = m.group(2).strip().lower()
+    powershell = m.group(1) == "PowerShell"
+    for name in POWERSHELL_NAMES if powershell else BASH_RUNNERS:
+        if words in (name, name + ":*", name + " *", name + "*"):
+            return True
+        # a flag, then a wildcard (python3 -c *, sh -c:*). In a Bash rule, python -m with a dotted module
+        # (python3 -m http.server *) names one program, as Claude Code reads it; PowerShell has no such exception
+        if words.startswith(name + " -") and words.endswith("*") and (powershell or not (
+                re.match(r"python[\d.]*$", name)
+                and re.match(r"-m\s+\w+\.[\w.]+(?:\s*:|\s+)$", words[len(name) + 1:-1]))):
+            return True
+    return False
+
+
 def claude_prompts_off(data, scope: str) -> list:
     """(setting, what it does, how to turn the prompt back on) for each setting in a Claude Code settings dict that
     turns a safety prompt off. scope is "user", "managed", "project" (a shared .claude/settings.json) or "local" (a
@@ -113,10 +180,13 @@ def claude_prompts_off(data, scope: str) -> list:
                     "asking" + (" (Claude Code 2.1.257 and later ignore this in a project's files; earlier versions "
                                 "honor it)" if in_project else ""),
                     'set "defaultMode" to "default" (or remove it)'))
-    # Claude Code ignores this key in a shared project file (settings reference, scope "User, local, or managed")
+    # Claude Code ignores this key in a shared project file (settings reference, scope "User, local, or managed"). It
+    # writes the key to your settings itself when you accept the bypass-mode warning once (2.1.309: "Whether the user
+    # has accepted the bypass permissions mode dialog"), so in your own settings it's usually your old answer.
     if data.get("skipDangerousModePermissionPrompt") is True and scope != "project":
         out.append(("skipDangerousModePermissionPrompt",
-                    "Claude Code doesn't warn you before it switches to bypass mode",
+                    "Claude Code doesn't warn you before it switches to bypass mode"
+                    + (" (it saves this when you accept that warning once)" if scope == "user" else ""),
                     'remove "skipDangerousModePermissionPrompt", and Claude Code warns you again'))
     if data.get("enableAllProjectMcpServers") is True:
         out.append(("enableAllProjectMcpServers",
@@ -125,11 +195,13 @@ def claude_prompts_off(data, scope: str) -> list:
                     'remove "enableAllProjectMcpServers", and approve the servers you want by name in '
                     '"enabledMcpjsonServers"'))
     allow = perms.get("allow") if isinstance(perms.get("allow"), list) else []
-    broad = [r for r in allow if isinstance(r, str) and BROAD_SHELL_RULE.match(r)]
+    broad = [r for r in allow if isinstance(r, str) and broad_shell_rule(r)]
     if broad:
+        runner = any(re.search(r"\w", SHELL_RULE.match(r).group(2) or "") for r in broad)   # a program, not a wildcard
+        # Claude Code holds a project's allow rules, settings.local.json's included, until you trust the folder
         out.append(("permissions.allow " + ", ".join('"%s"' % r for r in broad),
-                    "any shell command runs without asking" + (" once you trust the folder" if scope == "project"
-                                                               else ""),
+                    "any shell command runs without asking" + (" once you trust the folder" if in_project else "")
+                    + (" (python3, bash, env and the like run whatever they're given)" if runner else ""),
                     "replace %s with rules for the commands you mean, such as \"Bash(npm run test *)\""
                     % ", ".join('"%s"' % r for r in broad)))
     return out
@@ -147,6 +219,19 @@ def _claude_files(home: Path, environ) -> list:
     return files
 
 
+def _local_file_in_git(path: Path) -> str:
+    """Whether git tracks a project's settings.local.json: "tracked", "untracked", "no repo" (its folder isn't in a git
+    repository, like a download or a copied folder), or "unknown" (git refused the repository, failed, or isn't there).
+    Only git's own "not tracked" (exit 1) makes it untracked; Claude Code 2.1.309 reads git's answer the same way."""
+    answer = git_ls_file(path)
+    if answer is None:
+        return "unknown"
+    code, error = answer
+    if code in (0, 1):
+        return "tracked" if code == 0 else "untracked"
+    return "no repo" if code == 128 and "not a git repository" in error else "unknown"
+
+
 def _claude_finding(finding, path: Path, scope: str, items: list):
     what = "; ".join("%s: %s" % (setting, does) for setting, does, _ in items)
     fixes = "; ".join(fix for _, _, fix in items)
@@ -158,14 +243,17 @@ def _claude_finding(finding, path: Path, scope: str, items: list):
     off = "safety prompts" if removes else "warning before bypass mode"
     hidden_act = ("You may have chosen this. It also means a prompt hidden in a file Claude reads can act without you "
                   "seeing it first." if removes else
-                  "You may have chosen this. On its own it removes only that warning: it matters when Claude Code is "
-                  "started in bypass mode (claude --dangerously-skip-permissions).")
+                  # in your own settings, the setting's text already says Claude Code saved your answer there
+                  "%sOn its own it removes only that warning: it matters when Claude Code is started in bypass mode "
+                  "(claude --dangerously-skip-permissions)."
+                  % ("" if scope == "user" else "You may have chosen this. "))
     undo = "To undo, put the old lines back."
-    tracked = None
+    git = None
     if scope == "local":
-        # Claude Code treats an untracked settings.local.json as the user's own and a tracked one as the repository's
-        tracked = _git_tracked(path)
-        details["git_tracked"] = tracked
+        # Claude Code saves your "don't ask again" answers in a project's settings.local.json; a tracked one came with
+        # the repository, and one git can't vouch for may have come with the folder
+        git = _local_file_in_git(path)
+        details["git_tracked"] = {"tracked": True, "untracked": False}.get(git)
     if scope == "user":
         return finding("medium", "Claude Code %s turned off in your settings" % off,
                        "%s turns off Claude Code's %s. %s. %s" % (path, off, what, hidden_act),
@@ -176,24 +264,32 @@ def _claude_finding(finding, path: Path, scope: str, items: list):
                        "account on it. %s." % (path, off, what),
                        "If you administer this machine, edit %s with sudo: %s. Otherwise ask whoever does. %s"
                        % (path, fixes, undo), details)
-    if scope == "local" and tracked is False:
+    if git == "untracked":
         return finding("medium", "Claude Code %s turned off for one project: %s" % (off, root),
-                       "%s turns off Claude Code's %s in this project. %s. Git doesn't track the file, so Claude Code "
-                       "treats it as yours, and so does Sereno. If you didn't write it, treat it as the project's. %s"
+                       "%s turns off Claude Code's %s in this project. %s. Git doesn't track the file, so it's most "
+                       "likely yours (Claude Code saves your \"don't ask again\" answers there), and Sereno treats it "
+                       "as yours. If you didn't write it, treat it as the project's. %s"
                        % (path, off, what, hidden_act),
                        "To turn it back on, edit %s: %s. %s" % (path, fixes, undo), details)
     why = ("A repository someone else wrote can do this to you; if this one is yours, it does it to everyone who "
            "clones it.")
-    if scope == "local":
-        why += (" Git tracks this settings.local.json, so it came with the repository." if tracked else
+    keep = "If they're yours, keep them only in %s, out of git." % (root / ".claude" / "settings.local.json")
+    if git == "tracked":
+        why += " Git tracks this settings.local.json, so it came with the repository."
+        keep = ("If they're yours, stop tracking the file so it stays on your machine: git -C %s rm --cached "
+                ".claude/settings.local.json (to undo: git add it again)." % root)
+    elif git:
+        why += (" The folder isn't in a git repository, so Sereno can't tell whether you wrote this "
+                "settings.local.json or it came with the folder (a download or a copied folder brings it along); "
+                "it's treated as if it came with the folder." if git == "no repo" else
                 " Sereno couldn't ask git whether this settings.local.json came with the repository, so it's treated "
                 "as if it did.")
+        keep = "If you wrote them yourself, they're yours to keep: Sereno can't tell that from git."
     return finding("high", "A project folder switches off Claude Code's %s: %s" % (off, root),
                    "%s is part of the project in %s and turns off Claude Code's %s for whoever runs it there. %s. %s"
                    % (path, root, off, what, why),
-                   "Read %s before you run Claude Code in %s. If you didn't put these lines there, remove them. If "
-                   "they're yours, keep them only in %s, out of git. %s"
-                   % (path, root, root / ".claude" / "settings.local.json", undo), details)
+                   "Read %s before you run Claude Code in %s. If you didn't put these lines there, remove them. %s %s"
+                   % (path, root, keep, undo), details)
 
 
 def _claude_findings(finding, home: Path, environ) -> list:
@@ -208,7 +304,7 @@ def _claude_findings(finding, home: Path, environ) -> list:
             if text is None:
                 continue
             data = json.loads(text)
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, RecursionError) as e:   # RecursionError: JSON nested too deep to parse
             out.append(_not_checked(finding, path, e, "its permission settings"))
             continue
         items = claude_prompts_off(data, scope)
@@ -339,7 +435,7 @@ def _json_settings(finding, path: Path, what: str):
         if text is None:
             return None, None
         return json.loads(strip_jsonc(text)), None
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         return None, _not_checked(finding, path, e, what)
 
 
@@ -385,25 +481,33 @@ def _vscode_findings(finding, home: Path) -> list:
 # ── Shell startup files: skip flags and credentials ──
 
 def _logical_lines(text: str) -> list:
-    """(first line number, text) with lines ending in a backslash joined to the next, as the shell reads them."""
-    out, buf, start = [], [], 0
+    r"""(first line number, text) with a line ending in a backslash joined to the next, the backslash and the line break
+    removed, as the shell reads them. A backslash that is escaped (\\) or sits in a comment doesn't continue a line.
+    Each line is read once, carrying the open quote over, so a long run of continued lines costs one pass."""
+    out, parts, start, quote, before = [], [], 0, None, " "
     for n, line in enumerate(text.splitlines(), 1):
-        if not buf:
-            start = n
-        if line.endswith("\\"):
-            buf.append(line[:-1])
+        if not parts:
+            start, quote, before = n, None, " "
+        comment, quote = _scan(line, quote, before)
+        if comment is None and (len(line) - len(line.rstrip("\\"))) % 2:
+            line = line[:-1]
+            parts.append(line)
+            before = line[-1] if line else before
             continue
-        buf.append(line)
-        out.append((start, " ".join(buf)))
-        buf = []
-    if buf:
-        out.append((start, " ".join(buf)))
+        parts.append(line)
+        out.append((start, "".join(parts)))
+        parts = []
+    if parts:
+        out.append((start, "".join(parts)))
     return out
 
 
-def _code(line: str) -> str:
-    """A shell or fish line without its comment: from a # that starts a word, outside quotes."""
-    quote, i = None, 0
+def _scan(line: str, quote=None, before: str = " "):
+    r"""Read one shell or fish line: (where its comment starts, or None; the quote still open at its end). A comment
+    starts at a # that starts a word, outside quotes. Outside quotes a backslash escapes the next character, so \'
+    doesn't open a quote and \# doesn't start a comment. For a line continued from the one before, quote is the quote
+    open where it starts and before is the character just before it."""
+    i = 0
     while i < len(line):
         c = line[i]
         if quote:
@@ -411,12 +515,20 @@ def _code(line: str) -> str:
                 i += 1
             elif c == quote:
                 quote = None
+        elif c == "\\":
+            i += 1
         elif c in "\"'":
             quote = c
-        elif c == "#" and (i == 0 or line[i - 1].isspace()):
-            return line[:i]
+        elif c == "#" and (line[i - 1] if i else before).isspace():
+            return i, quote
         i += 1
-    return line
+    return None, quote
+
+
+def _code(line: str) -> str:
+    """A shell or fish line without its comment (see _scan)."""
+    comment, _ = _scan(line)
+    return line if comment is None else line[:comment]
 
 
 def skip_flags(code: str) -> list:
@@ -429,13 +541,28 @@ def skip_flags(code: str) -> list:
 
 def credential_assignments(code: str) -> list:
     """(variable, value as written) for each assignment to an agent credential variable in one shell or fish line:
-    NAME=value (with or without export, or as ${NAME=value}), and fish's set -gx NAME value. $NAME=... isn't one."""
+    NAME=value (with or without export, or as ${NAME=value}), and fish's set -gx NAME value. $NAME=... isn't one. A
+    default in ${NAME:-value} or ${NAME:=value} counts when it looks like a key: it's written in the file all the same
+    (and ${NAME:-unset} is only a word to print)."""
     out = []
     for name in CRED_VARS:
         for m in re.finditer(r"(?<![\w$])%s=(\"[^\"]*\"|'[^']*'|[^\s;&|)}`'\"]*)" % name, code):
             out.append((name, m.group(1)))
-        for m in re.finditer(r"\bset\s+(?:--?[A-Za-z-]+\s+)*%s\b(?:\s+(\"[^\"]*\"|'[^']*'|[^\s;&|]+))?" % name, code):
+        for m in re.finditer(r"\$\{%s(?::?-|:=)([^}]*)\}" % name, code):
+            if _looks_like_key(_literal(m.group(1))):
+                out.append((name, m.group(1)))
+        for m in re.finditer(r"\bset\s+(?:-\S*\s+)*%s\b(?:\s+(\"[^\"]*\"|'[^']*'|[^\s;&|]+))?" % name, code):
             out.append((name, m.group(1) or ""))
+    return out
+
+
+def fish_universal(text: str) -> list:
+    """(line number, variable, value) for each agent credential in fish's fish_variables file."""
+    out = []
+    for n, line in enumerate(text.splitlines(), 1):
+        m = re.match(r"SETUVAR\s+(?:--export\s+)?(\w+):(.*)$", line)
+        if m and m.group(1) in CRED_VARS:
+            out.append((n, m.group(1), re.sub(r"\\x([0-9a-fA-F]{2})", lambda h: chr(int(h.group(1), 16)), m.group(2))))
     return out
 
 
@@ -451,23 +578,26 @@ def _literal(value: str) -> str:
 
 
 def _looks_like_key(value: str) -> bool:
-    """A real key or token rather than a placeholder such as "ollama", which local model servers ask for: 20 characters
-    or more, or shaped like a known token (sentinel/redact.py). Every agent key format Sereno knows is longer."""
-    return len(value) >= 20 or redact(value) != value
+    """A real key or token rather than a placeholder: shaped like a known token (sentinel/redact.py), or 20 characters
+    or more that aren't a placeholder like your_api_key_here (PLACEHOLDER). A short value such as "ollama", which local
+    model servers ask for, isn't one; every agent key format Sereno knows is longer."""
+    if redact(value) != value:
+        return True
+    return len(value) >= 20 and not PLACEHOLDER.search(value)
 
 
-def _credential_finding(finding, name: str, value: str, path: Path, line):
+def _credential_finding(finding, name: str, value: str, path: Path, line, remove: str = None):
     """A finding for a credential variable assigned in a file, or None when the value isn't a literal. The value never
-    goes into the finding."""
+    goes into the finding. remove is how to take it out, when that's more than editing the line."""
     if not _literal(value):
         return None
     where = "%s:%d" % (path, line) if line else str(path)
     details = {"path": str(path), "line": line, "variable": name}
     if not _looks_like_key(_literal(value)):
-        return finding("info", "Agent credential variable set to a short value: %s (%s)" % (name, where),
-                       "%s is set to a short value in %s. It looks like a placeholder rather than a key (local model "
-                       "servers often want one), so it isn't counted as an issue. Sereno doesn't show it."
-                       % (name, where),
+        return finding("info", "Agent credential variable set to a placeholder: %s (%s)" % (name, where),
+                       "%s is set in %s to a value that looks like a placeholder rather than a key (short, or words "
+                       "like your_key_here; local model servers often want one), so it isn't counted as an issue. "
+                       "Sereno doesn't show it." % (name, where),
                        "If it's a real key, move it out of the file and replace it.", details)
     try:
         mode = stat.S_IMODE(os.stat(str(path)).st_mode)
@@ -479,10 +609,20 @@ def _credential_finding(finding, name: str, value: str, path: Path, line):
                    "%s is set to a literal value in %s. Anything that can read the file has it: backups, dotfile "
                    "repositories, and every program you run.%s%s Sereno doesn't show the value."
                    % (name, where, others, year),
-                   "Take it out of %s and keep it in your system's keychain or a password manager, loading it when you "
-                   'need it (for example export %s="$(secret-tool lookup service %s)" in a shell file). Then revoke '
-                   "it where you made it and make a new one, because copies of the file may already hold it. To undo, "
-                   "put the line back." % (where, name, name), details)
+                   "%s and keep it in your system's keychain or a password manager, loading it when you need it (for "
+                   'example export %s="$(secret-tool lookup service %s)" in a shell file). Then revoke it where you '
+                   "made it and make a new one, because copies of the file may already hold it. To undo, put the line "
+                   "back." % (remove or "Take it out of %s" % where, name, name), details)
+
+
+def _commented_key_finding(finding, name: str, path: Path, line: int):
+    where = "%s:%d" % (path, line)
+    return finding("info", "Agent key left in a commented-out line: %s (%s)" % (name, where),
+                   "Line %d of %s sets %s to what looks like a key, in a comment. The shell doesn't use it, but "
+                   "commenting a line out doesn't remove it: the key is still in the file, its backups and any dotfile "
+                   "repository. Sereno doesn't show it." % (line, path, name),
+                   "If the key still works, revoke it where you made it, then delete the line. To undo, put the line "
+                   "back.", {"path": str(path), "line": line, "variable": name})
 
 
 def _flag_finding(finding, path: Path, lineno: int, code: str, flags: list):
@@ -505,8 +645,8 @@ def _flag_finding(finding, path: Path, lineno: int, code: str, flags: list):
 
 def _shell_files(home: Path) -> list:
     files = [home / f for f in SHELL_FILES]
-    for d in FISH_DIRS:
-        files += sorted((home / d).glob("*.fish"))
+    for d, pattern in SHELL_DIRS:
+        files += sorted(p for p in (home / d).glob(pattern) if p.is_file())
     return files
 
 
@@ -529,6 +669,19 @@ def _shell_findings(finding, home: Path) -> list:
                 f = _credential_finding(finding, name, value, path, lineno)
                 if f:
                     out.append(f)
+            for name, value in credential_assignments(line[len(code):]):   # the comment, if there is one
+                if _looks_like_key(_literal(value)):
+                    out.append(_commented_key_finding(finding, name, path, lineno))
+    path = home / FISH_UNIVERSAL
+    try:
+        text = _read(path)
+    except OSError as e:
+        return out + [_not_checked(finding, path, e, "its universal variables")]
+    for lineno, name, value in fish_universal(text or ""):
+        f = _credential_finding(finding, name, value, path, lineno,
+                                "Remove it with `set -Ue %s` (fish keeps set -U variables in %s)" % (name, path))
+        if f:
+            out.append(f)
     return out
 
 

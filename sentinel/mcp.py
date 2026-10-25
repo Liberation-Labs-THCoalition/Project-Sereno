@@ -229,15 +229,26 @@ def project_configs(home: Path, extra_roots=()) -> list:
     return [(r / n, keys, tool) for r in sorted(roots) for n, keys, tool in names if (r / n).is_file()]
 
 
-def _git_tracked(path: Path):
-    """True if git tracks the file, False if not (or it isn't in a repo), None if git couldn't be asked."""
+def git_ls_file(path: Path):
+    """(exit code, error text) of `git ls-files --error-unmatch` for one file: 0 when git tracks it, 1 when it doesn't,
+    128 when its folder isn't in a repository git will read; None when git couldn't be run. The folder's own git config
+    can't start a program: its fsmonitor command and hooks are switched off (a downloaded folder can carry a .git/config
+    whose core.fsmonitor runs on `ls-files`), as Claude Code does for the same question. Errors come in English."""
     try:
         # One `ls-files` on one file answers in milliseconds; 10 s only bounds a git that hangs (a network drive)
-        p = subprocess.run(["git", "-C", str(path.parent), "ls-files", "--error-unmatch", path.name],
-                           capture_output=True, text=True, timeout=10)
-        return p.returncode == 0
+        p = subprocess.run(["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=" + os.devnull, "--literal-pathspecs",
+                            "-C", str(path.parent), "ls-files", "--error-unmatch", "--", path.name],
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=10,
+                           env=dict(os.environ, LC_ALL="C", LANGUAGE="C"))
+        return p.returncode, p.stderr
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def _git_tracked(path: Path):
+    """True if git tracks the file, False if not (or it isn't in a repo), None if git couldn't be asked."""
+    answer = git_ls_file(path)
+    return None if answer is None else answer[0] == 0
 
 
 def _read_toml_servers(path: Path):
@@ -266,7 +277,7 @@ def check_mcp_servers(finding, home: Path = None, known_bad_npm: dict = None, kn
     if claude.is_file():
         try:
             extra = [p for p in (json.loads(claude.read_text()).get("projects") or {}) if Path(p).is_dir()]
-        except (OSError, ValueError, AttributeError):
+        except (OSError, ValueError, AttributeError, RecursionError):
             extra = []
     entries += project_configs(home, extra)
     codex = home / ".codex" / "config.toml"
@@ -285,7 +296,7 @@ def check_mcp_servers(finding, home: Path = None, known_bad_npm: dict = None, kn
                     continue
             else:
                 servers = _servers_in(json.loads(strip_jsonc(path.read_text(errors="replace"))), keys)
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, RecursionError) as e:  # RecursionError: JSON nested too deep to parse
             out.append(finding("info", "MCP config not checked: %s" % path,
                                "Sereno couldn't read it (%s), so its servers weren't checked." % type(e).__name__,
                                "Check that the file is valid JSON.", {"path": str(path)}))

@@ -6,12 +6,20 @@ What changed in Sereno, in plain words. Newest first. To get the changes, run `g
 
 - **New check: AI agent safety (`agent_safety`).** Sereno now reports AI coding agents set to skip their own
   safety prompts: Claude Code's bypass mode, its warning before bypass mode turned off, every project MCP server
-  approved, or every shell command allowed; Codex set to never ask with no sandbox; VS Code's global auto-approve;
-  Gemini CLI letting every shell command through; and shell aliases that start `claude`, `codex` or `gemini` with
-  their skip flags. In your own settings that's advice (medium), with how to turn the prompt back on; in a project
-  folder's Claude Code settings it's high. It also reports agent logins left exposed: a login file other accounts
-  can read (`chmod 600` fixes it), and an agent API key or token written into a shell startup file or your Claude
-  Code settings, by name and line, never the value.
+  approved, or every shell command allowed (including a rule for a program that runs whatever it's given, such as
+  `Bash(python3:*)`); Codex set to never ask with no sandbox; VS Code's global auto-approve; Gemini CLI letting every
+  shell command through; and shell aliases that start `claude`, `codex` or `gemini` with their skip flags. In your
+  own settings that's advice (medium), with how to turn the prompt back on; in a project folder's Claude Code
+  settings it's high. It also reports agent logins left exposed: a login file other accounts can read (`chmod 600`
+  fixes it), and an agent API key or token written into a shell startup file, fish's universal variables or your
+  Claude Code settings, by name and line, never the value.
+- **MCP check: a scanned folder's git settings can't run a program.** To learn whether a config holding a secret is
+  in git, Sereno asks git, and git used to run the fsmonitor command named in that folder's own `.git/config`, so a
+  downloaded folder could make a read-only scan run a program. Sereno now switches that command and git hooks off
+  for the question, as Claude Code does.
+- **A settings file nested too deep to parse no longer stops a check.** A JSON file in a project folder nested
+  deeper than Python can parse used to stop the persistence, MCP and agent checks, losing their other findings. It's
+  now reported as not checked, like any file Sereno can't read.
 
 ## 2026-10-23
 

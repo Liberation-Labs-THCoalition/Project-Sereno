@@ -167,6 +167,28 @@ def test_when_git_cannot_be_asked_the_finding_says_so(home, monkeypatch):
     assert out[0].severity == "medium" and "couldn't ask git" in out[0].description
 
 
+def test_with_no_git_to_run_the_finding_says_git_couldnt_be_asked(home, monkeypatch, tmp_path):
+    write(home / ".claude.json", {"mcpServers": {"gh": {"command": "node", "env": {"GITHUB_TOKEN": TOKEN}}}})
+    monkeypatch.setenv("PATH", str(tmp_path / "no-programs-here"))
+    out = mcp.check_mcp_servers(make, home)
+    assert out[0].details["git_tracked"] is None and "couldn't ask git" in out[0].description
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_git_is_asked_about_that_one_file_whatever_its_name(tmp_path):
+    """A name git could read as a pattern (*.json) or an option (-x.json) is asked about as the file itself."""
+    repo = tmp_path / "repo"
+    write(repo / "a.json", {})
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "a.json"], check=True)
+    assert mcp.git_ls_file(repo / "a.json") == (0, "")
+    for name in ("*.json", "-x.json"):
+        write(repo / name, {})
+        code, error = mcp.git_ls_file(repo / name)
+        assert code == 1 and "did not match" in error, name   # untracked, though a.json is tracked
+    assert mcp.git_ls_file(tmp_path / "elsewhere" / "b.json")[0] == 128   # its folder isn't there, let alone a repo
+
+
 def test_an_unreadable_config_is_not_checked_never_clean(home):
     write(home / ".claude.json", "{ this is not json")
     out = mcp.check_mcp_servers(make, home)

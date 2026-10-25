@@ -11,8 +11,10 @@ from pathlib import Path
 import pytest
 
 from sentinel import agent_safety as ag
-from sentinel import scanner
+from sentinel import mcp, scanner
 from sentinel.scanner import CHECK_NAMES, Finding, SentinelScanner
+
+LOCAL_FILE_IN_GIT = ag._local_file_in_git   # the real one; the home fixture replaces it
 
 ANTHROPIC_KEY = "sk-ant-api03-" + "Zq7wR" * 18
 OAUTH_TOKEN = "sk-ant-oat01-" + "x9YpL" * 15
@@ -34,6 +36,11 @@ def write(path: Path, data, mode=None):
     return path
 
 
+def fish_escape(value: str) -> str:
+    """A value as fish writes it in fish_variables: - and other punctuation as \\xHH."""
+    return "".join(c if c.isalnum() else "\\x%02x" % ord(c) for c in value)
+
+
 def never_shown(findings, *secrets):
     """No secret, nor a distinctive piece of one, appears anywhere in a finding."""
     for f in findings:
@@ -48,7 +55,7 @@ def home(tmp_path, monkeypatch):
     h.mkdir()
     monkeypatch.setenv("HOME", str(h))
     monkeypatch.setattr(ag, "MANAGED_FILES", ())   # never read the real /etc/claude-code in a test
-    monkeypatch.setattr(ag, "_git_tracked", lambda path: False)
+    monkeypatch.setattr(ag, "_local_file_in_git", lambda path: "untracked")
     return h
 
 
@@ -102,20 +109,74 @@ def test_safe_settings_are_quiet(home):
 
 
 @pytest.mark.parametrize("rule,broad", [
-    ("Bash", True), ("Bash(*)", True), ("Bash(:*)", True), ("Bash( * )", True), ("Shell", True), ("Shell *", True),
-    ("PowerShell", True), ("PowerShell(*)", True),
-    ("Bash(npm run *)", False), ("Bash(ls*)", False), ("Bash()", False), ("Bashful", False), ("WebFetch", False),
-    ("Bash(git:*)", False), ("mcp__srv__tool", False), ("bash", False),
+    ("Bash", True), ("Bash(*)", True), ("Bash(:*)", True), ("Bash( * )", True), ("Shell", True), ("Shell(*)", True),
+    ("PowerShell", True), ("PowerShell(*)", True), ("Bash()", True), ("Bash(**)", True), ("Bash(*:*)", True),
+    ("Bash(* *)", True),
+    # a program that runs whatever it's given, alone, with a wildcard, or with a flag and a wildcard
+    ("Bash(bash:*)", True), ("Bash(env *)", True), ("Bash(python3:*)", True), ("Bash(xargs*)", True),
+    ("Bash(sudo)", True), ("Bash(SSH:*)", True), ("Bash(npm run *)", True), ("Bash(sh -c:*)", True),
+    ("Bash(python3 -c *)", True), ("Bash(python -m pip *)", True), ("PowerShell(iex:*)", True),
+    ("PowerShell(pwsh -Command *)", True), ("PowerShell(python3 *)", True),
+    # rules naming a command
+    ("Bash(npm run test *)", False), ("Bash(ls*)", False), ("Bashful", False), ("WebFetch", False),
+    ("Bash(git:*)", False), ("mcp__srv__tool", False), ("bash", False), ("Bash(:)", False), ("Bash(sudo apt:*)", False),
+    ("Bash(python3 script.py *)", False), ("Bash(python3 -m http.server *)", False), ("Bash(pythonista:*)", False),
+    ("Bash(env FOO=1 make:*)", False), ("Bash(iex:*)", False), ("PowerShell(Get-ChildItem *)", False),
+    ("Bash(sh -c)", False), ("Bash *", False),   # not a rule form Claude Code reads (Tool or Tool(content))
+    ("Bash(node -m foo.bar *)", True),            # only python's -m names a module
+    ("Bash(python3 -m pytest *)", True),          # Claude Code reads an undotted module as any program
+    # Claude Code trims a rule's content and keeps a line break in it
+    ("Bash( python3:* )", True), ("Bash(*\n)", True), ("Bash(w*)", False),
+    # every python's -m with a dotted module names one program, with a :* too
+    ("Bash(python -m http.server *)", False), ("Bash(python2 -m json.tool *)", False),
+    ("Bash(python3 -m http.server:*)", False),
+    # PowerShell has no -m exception, and counts a program by its .exe name too; Bash doesn't
+    ("PowerShell(python3 -m http.server *)", True), ("PowerShell(python.exe:*)", True),
+    ("PowerShell(npm.exe run *)", True), ("PowerShell(pwsh.exe -Command *)", True), ("Bash(python.exe:*)", False),
 ])
 def test_broad_shell_rule(rule, broad):
-    assert bool(ag.BROAD_SHELL_RULE.match(rule)) is broad
+    assert ag.broad_shell_rule(rule) is broad
+
+
+# Claude Code 2.1.309's own lists of programs that run whatever they're given (written out, not read from Sereno)
+CC_SHELL_RUNNERS = ["python", "python3", "python2", "node", "deno", "tsx", "ruby", "perl", "php", "lua", "npx", "bunx",
+                    "npm run", "yarn run", "pnpm run", "bun run", "bash", "sh", "ssh"]
+CC_BASH_ONLY = ["zsh", "fish", "eval", "exec", "env", "xargs", "sudo"]
+CC_POWERSHELL_ONLY = [
+    "pwsh", "powershell", "cmd", "wsl", "iex", "invoke-expression", "icm", "invoke-command", "start-process", "saps",
+    "start", "start-job", "sajb", "start-threadjob", "invoke-wmimethod", "iwmi", "invoke-cimmethod", "icim", "wmic",
+    "register-objectevent", "register-engineevent", "register-wmievent", "register-scheduledjob", "new-pssession", "nsn",
+    "enter-pssession", "etsn", "add-type", "new-object"]
+
+
+@pytest.mark.parametrize("name", CC_SHELL_RUNNERS + CC_BASH_ONLY)
+def test_every_program_on_claude_codes_bash_list_is_broad(name):
+    for form in ("Bash(%s)", "Bash(%s:*)", "Bash(%s *)", "Bash(%s*)", "Bash(%s -x *)"):
+        assert ag.broad_shell_rule(form % name.upper()), form % name
+
+
+@pytest.mark.parametrize("name", CC_SHELL_RUNNERS + CC_POWERSHELL_ONLY)
+def test_every_program_on_claude_codes_powershell_list_is_broad(name):
+    exe = name.replace(" ", ".exe ", 1) if " " in name else name + ".exe"
+    for form in ("PowerShell(%s)", "PowerShell(%s:*)", "PowerShell(%s *)", "PowerShell(%s -x *)"):
+        assert ag.broad_shell_rule(form % name) and ag.broad_shell_rule(form % exe), form % name
+    if name in CC_POWERSHELL_ONLY:
+        assert not ag.broad_shell_rule("Bash(%s:*)" % name)   # Windows launchers count in PowerShell rules only
 
 
 def test_the_warning_alone_is_named_as_a_warning(home):
+    """Claude Code saves skipDangerousModePermissionPrompt itself when you accept the bypass-mode warning once."""
     write(home / ".claude" / "settings.json", {"skipDangerousModePermissionPrompt": True})
     out = run(home)
     assert [f.title for f in out] == ["Claude Code warning before bypass mode turned off in your settings"]
     assert "removes only that warning" in out[0].description and "hidden in a file" not in out[0].description
+    assert "it saves this when you accept that warning once" in out[0].description
+    assert "You may have chosen this" not in out[0].description
+    assert 'remove "skipDangerousModePermissionPrompt"' in out[0].remediation and "To undo" in out[0].remediation
+    # in a project's own file, Claude Code didn't put it there
+    write(home / "code" / "app" / ".claude" / "settings.local.json", {"skipDangerousModePermissionPrompt": True})
+    local = next(f for f in run(home) if f.details["scope"] == "local")
+    assert "You may have chosen this" in local.description and "accept" not in local.description
 
 
 def test_a_projects_settings_are_high(home):
@@ -126,6 +187,8 @@ def test_a_projects_settings_are_high(home):
                                 % (home / "code" / "app"))]
     assert "2.1.257" in out[0].description and "once you trust the folder" in out[0].description
     assert out[0].details["scope"] == "project"
+    assert "keep them only in %s, out of git" % (home / "code" / "app" / ".claude" / "settings.local.json") \
+        in out[0].remediation
 
 
 def test_a_shared_project_file_cant_skip_the_warning(home):
@@ -137,29 +200,76 @@ def test_a_shared_project_file_cant_skip_the_warning(home):
     assert [f.details["settings"] for f in run(home)] == [["skipDangerousModePermissionPrompt"]]
 
 
-@pytest.mark.parametrize("tracked,severity,says", [
-    (False, "medium", "Git doesn't track the file"),
-    (True, "high", "Git tracks this settings.local.json"),
-    (None, "high", "couldn't ask git"),
+@pytest.mark.parametrize("git,severity,tracked,says,fix", [
+    ("untracked", "medium", False, "Git doesn't track the file, so it's most likely yours", "To turn it back on"),
+    ("tracked", "high", True, "Git tracks this settings.local.json", "rm --cached .claude/settings.local.json"),
+    ("no repo", "high", None, "The folder isn't in a git repository", "they're yours to keep"),
+    ("unknown", "high", None, "couldn't ask git", "they're yours to keep"),
 ])
-def test_a_projects_local_file_is_yours_only_when_git_doesnt_track_it(home, monkeypatch, tracked, severity, says):
+def test_a_projects_local_file_is_yours_only_when_git_says_it_doesnt_track_it(home, monkeypatch, git, severity,
+                                                                               tracked, says, fix):
     write(home / "code" / "app" / ".claude" / "settings.local.json", {"permissions": {"allow": ["Bash"]}})
-    monkeypatch.setattr(ag, "_git_tracked", lambda path: tracked)
+    monkeypatch.setattr(ag, "_local_file_in_git", lambda path: git)
     out = run(home)
     assert [(f.severity, f.details["git_tracked"]) for f in out] == [(severity, tracked)]
-    assert says in out[0].description
+    assert says in out[0].description and fix in out[0].remediation
+    # Claude Code holds a project's allow rules, settings.local.json's too, until you trust the folder
+    assert "once you trust the folder" in out[0].description
+    assert "keep them only in" not in out[0].remediation
+
+
+@pytest.mark.parametrize("answer,state", [
+    ((0, ""), "tracked"),
+    ((1, "error: pathspec 'settings.local.json' did not match any file(s) known to git\n"), "untracked"),
+    ((128, "fatal: not a git repository (or any of the parent directories): .git\n"), "no repo"),
+    ((128, "fatal: detected dubious ownership in repository at '/srv/x'\n"), "unknown"),
+    ((129, "usage: git ls-files"), "unknown"),
+    ((2, "fatal: not a git repository"), "unknown"),
+    (None, "unknown"),
+])
+def test_only_gits_own_not_tracked_answer_makes_a_local_file_untracked(monkeypatch, answer, state):
+    monkeypatch.setattr(ag, "git_ls_file", lambda path: answer)
+    assert LOCAL_FILE_IN_GIT(Path("/x/.claude/settings.local.json")) == state
+
+
+def test_a_local_bypass_mode_isnt_said_to_be_honored_as_yours(home):
+    """Claude Code 2.1.309 ignores bypass mode in any project file, settings.local.json included."""
+    write(home / "code" / "app" / ".claude" / "settings.local.json",
+          {"permissions": {"defaultMode": "bypassPermissions"}})
+    out = run(home)
+    assert [f.severity for f in out] == ["medium"]
+    assert "2.1.257 and later ignore this in a project's files" in out[0].description
+    assert "Claude Code treats it as yours" not in out[0].description and "don't ask again" in out[0].description
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 def test_git_decides_whose_local_file_it_is(home, monkeypatch):
-    from sentinel.mcp import _git_tracked
-    monkeypatch.setattr(ag, "_git_tracked", _git_tracked)
+    monkeypatch.setattr(ag, "_local_file_in_git", LOCAL_FILE_IN_GIT)
     proj = home / "code" / "app"
     write(proj / ".claude" / "settings.local.json", {"permissions": {"defaultMode": "bypassPermissions"}})
+    assert [(f.severity, f.details["git_tracked"]) for f in run(home)] == [("high", None)]   # not a repository yet
+    assert "isn't in a git repository" in run(home)[0].description
     subprocess.run(["git", "init", "-q", str(proj)], check=True)
     assert [f.severity for f in run(home)] == ["medium"]
     subprocess.run(["git", "-C", str(proj), "add", ".claude/settings.local.json"], check=True)
     assert [f.severity for f in run(home)] == ["high"]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_a_scanned_folders_git_config_cant_run_a_program(home, monkeypatch, tmp_path):
+    """A downloaded folder can carry its own .git/config. Its core.fsmonitor command runs on `git ls-files` unless
+    it's switched off; Sereno only reads."""
+    monkeypatch.setattr(ag, "_local_file_in_git", LOCAL_FILE_IN_GIT)
+    proj = home / "Downloads" / "template"
+    write(proj / ".claude" / "settings.local.json", {"permissions": {"defaultMode": "bypassPermissions"}})
+    subprocess.run(["git", "init", "-q", str(proj)], check=True)
+    marker = tmp_path / "RAN"
+    hook = write(tmp_path / "hook.sh", "#!/bin/sh\ntouch '%s'\n" % marker, mode=0o755)
+    subprocess.run(["git", "-C", str(proj), "config", "core.fsmonitor", str(hook)], check=True)
+    out = run(home)
+    assert not marker.exists(), "the scanned folder's git config ran a program"
+    assert [(f.severity, f.details["git_tracked"]) for f in out] == [("medium", False)]
+    assert mcp._git_tracked(proj / ".claude" / "settings.local.json") is False and not marker.exists()
 
 
 def test_known_projects_past_the_walk_are_read(home):
@@ -403,9 +513,10 @@ def test_credentials_from_elsewhere_are_fine(home):
         'export OPENAI_API_KEY=""',
         "export ANTHROPIC_API_KEY",
         "unset ANTHROPIC_API_KEY",
-        "# export ANTHROPIC_API_KEY=%s" % ANTHROPIC_KEY,
         "export MY_ANTHROPIC_API_KEY=%s" % ANTHROPIC_KEY,   # not an agent variable
-        'echo "${ANTHROPIC_API_KEY:-unset}"', ""]))
+        "export X=$ANTHROPIC_API_KEY=%s" % ANTHROPIC_KEY,    # $NAME=... isn't an assignment to NAME
+        "# export ANTHROPIC_API_KEY=your_anthropic_key_here",   # a placeholder in a comment
+        'echo "${ANTHROPIC_API_KEY:-unset}"', 'echo "${OPENAI_API_KEY:-$(pass show openai)}"', ""]))
     write(home / ".config" / "fish" / "conf.d" / "keys.fish",
           "set -gx GEMINI_API_KEY (secret-tool lookup service gemini)\nset -e OPENAI_API_KEY\n"
           "set -gx OPENAI_API_KEY $OTHER\n")
@@ -435,10 +546,14 @@ def test_a_file_ending_on_a_continued_line(home):
 
 def test_every_documented_shell_file_is_read(home):
     names = [".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".profile", ".zshrc", ".zprofile", ".zshenv",
-             ".config/fish/config.fish", ".config/fish/conf.d/agents.fish", ".config/fish/functions/c.fish"]
+             ".config/fish/config.fish", ".config/fish/conf.d/agents.fish", ".config/fish/functions/c.fish",
+             ".bashrc.d/ai", ".bashrc.d/keys.sh", ".oh-my-zsh/custom/aliases.zsh"]
     for name in names:
         write(home / name, "alias c='claude --dangerously-skip-permissions'\n")
     write(home / ".config" / "fish" / "conf.d" / "notes.txt", "alias c='claude --dangerously-skip-permissions'\n")
+    write(home / ".oh-my-zsh" / "custom" / "plugins" / "x" / "x.zsh",   # a plugin oh-my-zsh loads only by name
+          "alias c='claude --dangerously-skip-permissions'\n")
+    (home / ".bashrc.d" / "sub").mkdir()   # a folder there is skipped, not "couldn't read"
     assert sorted(f.details["path"] for f in run(home)) == sorted(str(home / n) for n in names)
 
 
@@ -501,6 +616,231 @@ def test_odd_shapes_dont_break_the_check(home, monkeypatch):
     result = SentinelScanner(checks=["agent_safety"]).scan()
     assert [(f.severity, f.details.get("settings")) for f in result.findings] == [
         ("medium", ['permissions.allow "Bash"'])]
+
+
+@pytest.mark.parametrize("line,flags", [
+    # gemini and codex count as the command run, not as another command's argument or part of a longer name
+    ("alias bio='conda install -c bioconda gemini -y'", []),
+    ("alias rmg='pip uninstall gemini-api -y'", []),
+    ("brew install gemini-cli -y", []),
+    ("which gemini -y", []),
+    ("alias cx='codex'; foo --yolo", []),
+    ("alias cx='codex' && cp -y a b", []),
+    ("npx -y @google/gemini-cli -y", [("gemini", "-y")]),
+    ("pnpm dlx @google/gemini-cli --yolo", [("gemini", "--yolo")]),
+    ("sudo -E codex --yolo", [("codex", "--yolo")]),
+    ("env FOO=1 gemini --yolo", [("gemini", "--yolo")]),
+    ("/usr/local/bin/gemini --approval-mode yolo", [("gemini", "--approval-mode yolo")]),
+    ("if true; then gemini -y; fi", [("gemini", "-y")]),
+    ("x=$(codex --yolo exec hi)", [("codex", "--yolo")]),
+    ("g() { gemini --yolo; }", [("gemini", "--yolo")]),
+    ('exec codex --yolo "$@"', [("codex", "--yolo")]),
+    ("command gemini -y", [("gemini", "-y")]),
+    ("alias x='gemini-api -y'", []),
+    # codex's -c overrides of approval_policy and sandbox_mode
+    ("alias cx='codex -c approval_policy=never -c sandbox_mode=danger-full-access'",
+     [("codex", "--ask-for-approval never with --sandbox danger-full-access")]),
+    ("codex --config 'approval_policy=\"never\"' --config=sandbox_mode=danger-full-access",
+     [("codex", "--ask-for-approval never with --sandbox danger-full-access")]),
+    ("codex -a never -c sandbox_mode='danger-full-access'",
+     [("codex", "--ask-for-approval never with --sandbox danger-full-access")]),
+    ("codex -c approval_policy=never", []),
+    ("codex -c sandbox_mode=danger-full-access -c approval_policy=on-request", []),
+    ("make -c approval_policy=never -c sandbox_mode=danger-full-access", []),
+    # wrappers and command substitution put the agent in command position too
+    ("nohup gemini --yolo &", [("gemini", "--yolo")]),
+    ("x=`codex --yolo exec hi`", [("codex", "--yolo")]),
+    # the agent installed, or named in a message, isn't the agent run
+    ("npm i -g @openai/codex --yolo", []),
+    ("pip install gemini-api --yolo", []),
+    ('echo "run gemini --approval-mode yolo for speed"', []),
+    ('echo "try: codex -a never" && codex -s danger-full-access', []),
+    ('echo "try: codex -s danger-full-access" && codex -a never', []),
+    # a quoted value can hold a space or a separator; an unquoted ; ends the command, so gemini is b's argument
+    ("X='a;b' codex --yolo", [("codex", "--yolo")]),
+    ('FOO="a b" gemini -y', [("gemini", "-y")]),
+    ("X=a;b gemini --yolo", []),
+])
+def test_skip_flags_need_the_agent_as_the_command(line, flags):
+    assert ag.skip_flags(line) == flags
+
+
+@pytest.mark.parametrize("rc,found", [
+    # the shell removes a backslash-newline outright: the key on the next line is the value
+    ("export ANTHROPIC_API_KEY=\\\n%s\n" % ANTHROPIC_KEY, [("high", 1)]),
+    # a comment ends at its line, backslash or not
+    ("# fast mode \\\nalias c='claude --dangerously-skip-permissions'\n", [("medium", 2)]),
+    ("export X=1  # note \\\nalias c='claude --dangerously-skip-permissions'\n", [("medium", 2)]),
+    # the backslash goes with the line break, so a # after it starts a comment
+    ("alias c='claude' \\\n# --dangerously-skip-permissions\n", []),
+    # an escaped backslash doesn't continue the line
+    ("echo a \\\\\nalias c='claude --dangerously-skip-permissions'\n", [("medium", 2)]),
+    # \' outside quotes isn't a quote, so the comment after it stays a comment
+    ("echo It\\'s ok # claude --dangerously-skip-permissions\n", []),
+    # a default written in ${NAME:-...} or ${NAME:=...} is in the file all the same
+    ('export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-%s}"\n' % ANTHROPIC_KEY, [("high", 1)]),
+    (': "${OPENAI_API_KEY:=%s}"\n' % OPENAI_KEY, [("high", 1)]),
+    ("export GEMINI_API_KEY=${GEMINI_API_KEY-%s}\n" % GEMINI_KEY, [("high", 1)]),
+    ('echo "${ANTHROPIC_API_KEY:-not set}"\n', []),
+    # a quote left open on a continued line stays open, so this # isn't a comment and the line goes on
+    ('claude --model "opus \\\n#1" \\\n--dangerously-skip-permissions\n', [("medium", 1)]),
+    # a # right after the joined text is mid-word (opus#1), not a comment, even after a line of just a backslash
+    ("claude --name opus\\\n#1 \\\n--dangerously-skip-permissions\n", [("medium", 1)]),
+    ("claude --name opus\\\n\\\n#1 \\\n--dangerously-skip-permissions\n", [("medium", 1)]),
+    # a quote left open at the end of a line that isn't continued doesn't carry over: an apostrophe in a here-document
+    # doesn't turn the comment after it into code that goes on to the next line
+    ("cat <<EOF\nDon't panic\nEOF\n# fast mode \\\nalias c='claude --dangerously-skip-permissions'\n", [("medium", 5)]),
+    ("echo 'unfinished\n# claude --dangerously-skip-permissions\n", []),
+])
+def test_shell_lines_are_read_as_the_shell_reads_them(home, rc, found):
+    write(home / ".bashrc", rc, mode=0o600)
+    out = run(home)
+    assert [(f.severity, f.details["line"]) for f in out] == found
+    never_shown(out)
+
+
+@pytest.mark.parametrize("value", ["your_openai_api_key_here", "YOUR-ANTHROPIC-KEY-GOES-HERE", "your.anthropic.key.here",
+                                   "x" * 32,
+                                   "<paste your key here>", "sk-...replace-me-with-your-key"])
+def test_a_long_placeholder_is_a_note_not_an_issue(home, value):
+    write(home / ".bashrc", 'export OPENAI_API_KEY="%s"\n' % value)
+    out = run(home)
+    assert [(f.severity, f.title) for f in out] == [
+        ("info", "Agent credential variable set to a placeholder: OPENAI_API_KEY (%s:1)" % (home / ".bashrc"))]
+    assert value not in out[0].description + out[0].remediation + repr(out[0].details)
+
+
+@pytest.mark.parametrize("length,severity", [(19, "info"), (20, "high")])
+def test_twenty_characters_is_where_a_value_counts_as_a_key(home, length, severity):
+    write(home / ".bashrc", 'export OPENAI_API_KEY="%s"\n' % ("Zq7wRk2P" * 3)[:length], mode=0o600)
+    assert [f.severity for f in run(home)] == [severity]
+
+
+def test_long_lines_are_read_in_one_pass(home):
+    """A line of thousands of ; or | used to be read once per separator (27 s for 20,000)."""
+    import time
+    write(home / ".bashrc", ";" * 20000 + "\n" + "|a" * 10000 + "\n" + "; '" + ";" * 20000 + "\n"
+          + "alias c='claude --dangerously-skip-permissions'\n")
+    start = time.time()
+    assert [f.details["line"] for f in run(home)] == [4]
+    assert time.time() - start < 5
+
+
+def test_long_runs_of_continued_lines_are_read_in_one_pass(home):
+    """Continued lines used to be read again with each line joined (233 s for 4,000)."""
+    import time
+    write(home / ".bashrc", "docker run \\\n" + "  --opt value \\\n" * 4000 + "  image\n"
+          + "alias c='claude --dangerously-skip-permissions'\n")
+    start = time.time()
+    assert [f.details["line"] for f in run(home)] == [4003]
+    assert time.time() - start < 5
+
+
+def test_a_key_in_a_commented_out_line_is_a_note(home):
+    write(home / ".bashrc", "# export ANTHROPIC_API_KEY=%s\nexport EDITOR=vim  # OPENAI_API_KEY=%s\n"
+                            "# set -gx GEMINI_API_KEY %s\n# export OPENAI_API_KEY=your_key_goes_here\n"
+                            % (ANTHROPIC_KEY, OPENAI_KEY, GEMINI_KEY))
+    out = run(home)
+    assert [(f.severity, f.details["variable"], f.details["line"]) for f in out] == [
+        ("info", "ANTHROPIC_API_KEY", 1), ("info", "OPENAI_API_KEY", 2), ("info", "GEMINI_API_KEY", 3)]
+    assert all("still in the file" in f.description and "revoke" in f.remediation for f in out)
+    never_shown(out)
+
+
+def test_fish_universal_variables_are_read(home):
+    write(home / ".config" / "fish" / "fish_variables",
+          "# This file contains fish universal variable definitions.\n# VERSION: 3.0\n"
+          "SETUVAR __fish_initialized:3400\nSETUVAR --export ANTHROPIC_API_KEY:%s\n"
+          "SETUVAR OPENAI_API_KEY:ollama\nSETUVAR fish_greeting:%s\nSETUVAR GEMINI_API_KEY:%s\n"
+          % (fish_escape(ANTHROPIC_KEY), fish_escape(OPENAI_KEY), fish_escape("your-key-goes-here-please")),
+          mode=0o600)
+    out = run(home)
+    path = home / ".config" / "fish" / "fish_variables"
+    # the escapes are undone before the value is judged: your\x2dkey... is the placeholder your-key-...
+    assert [(f.severity, f.details["variable"], f.details["line"]) for f in out] == [
+        ("high", "ANTHROPIC_API_KEY", 4), ("info", "OPENAI_API_KEY", 5), ("info", "GEMINI_API_KEY", 7)]
+    assert "set -Ue ANTHROPIC_API_KEY" in out[0].remediation and str(path) in out[0].title
+    never_shown(out)
+    never_shown(out, fish_escape(ANTHROPIC_KEY))
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads everything")
+def test_unreadable_claude_settings_and_fish_variables_are_not_checked(home):
+    write(home / ".claude" / "settings.json", {"permissions": {"defaultMode": "bypassPermissions"}}, mode=0o000)
+    write(home / ".config" / "fish" / "fish_variables", "SETUVAR --export ANTHROPIC_API_KEY:x\n", mode=0o000)
+    try:
+        out = run(home)
+    finally:
+        os.chmod(str(home / ".claude" / "settings.json"), 0o644)
+        os.chmod(str(home / ".config" / "fish" / "fish_variables"), 0o644)
+    assert sorted((f.severity, f.details["path"]) for f in out) == [
+        ("info", str(home / ".claude" / "settings.json")), ("info", str(home / ".config" / "fish" / "fish_variables"))]
+    assert all("wasn't checked" in f.title for f in out)
+
+
+def test_a_fish_set_line_with_many_flags_is_read_quickly():
+    import time
+    start = time.time()
+    assert ag.credential_assignments("set " + "--a " * 20 + "X") == []   # took 8 s when each flag matched two ways
+    assert ag.credential_assignments("set -g --export ANTHROPIC_API_KEY abc") == [("ANTHROPIC_API_KEY", "abc")]
+    assert time.time() - start < 1
+
+
+def test_a_one_line_triple_quoted_toml_value_ends_on_its_line(home):
+    write(home / ".codex" / "config.toml", 'instructions = """be brief"""\napproval_policy = "never"\n'
+                                           'sandbox_mode = "danger-full-access"\n')
+    assert [f.details["profile"] for f in run(home)] == [None]
+
+
+DEEP = "[" * 100000 + "]" * 100000
+
+
+def test_json_nested_too_deep_is_not_checked_and_the_rest_still_reported(home, monkeypatch):
+    """A project folder can hold a file nested too deep for Python's JSON parser. That file isn't checked; every other
+    finding of the check still comes through (through the scanner, a crash would lose them all)."""
+    monkeypatch.setattr(scanner, "_home", lambda: home)
+    for name in ag.CRED_VARS + ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    write(home / "code" / "evil" / ".claude" / "settings.json", DEEP)
+    write(home / "code" / "victim" / ".claude" / "settings.json", {"permissions": {"defaultMode": "bypassPermissions"}})
+    write(home / ".claude" / ".credentials.json", "{}", mode=0o644)
+    write(home / ".gemini" / "settings.json", DEEP)
+    write(home / ".config" / "Code" / "User" / "settings.json", DEEP)
+    result = SentinelScanner(checks=["agent_safety"]).scan()
+    got = sorted((f.severity, f.details.get("path")) for f in result.findings)
+    assert got == [("high", str(home / ".claude" / ".credentials.json")),
+                   ("high", str(home / "code" / "victim" / ".claude" / "settings.json")),
+                   ("info", str(home / ".config" / "Code" / "User" / "settings.json")),
+                   ("info", str(home / ".gemini" / "settings.json")),
+                   ("info", str(home / "code" / "evil" / ".claude" / "settings.json"))]
+
+
+def test_json_nested_too_deep_doesnt_stop_the_persistence_or_mcp_checks(home, monkeypatch):
+    """Through the scanner, a check that stops becomes one "Check couldn't run" finding and loses all its others."""
+    monkeypatch.setattr(scanner, "_home", lambda: home)
+    evil = home / "code" / "evil"
+    planted = [evil / ".claude" / "settings.json", evil / ".mcp.json", home / ".claude.json"]
+    for path in planted:
+        write(path, DEEP)
+    findings = SentinelScanner(checks=["persistence", "mcp_servers"]).scan().findings
+    assert [f.title for f in findings if "couldn't run" in f.title] == []
+    assert sorted((f.check, f.severity, f.details.get("path")) for f in findings
+                  if f.details.get("path") in {str(p) for p in planted}) == [
+        ("mcp_servers", "info", str(home / ".claude.json")), ("mcp_servers", "info", str(evil / ".mcp.json")),
+        ("persistence", "info", str(evil / ".claude" / "settings.json"))]
+
+
+def test_python_and_friends_in_your_allow_list_are_advice(home):
+    write(home / ".claude" / "settings.local.json", {"permissions": {"allow": [
+        "Bash(git:*)", "Bash(python3:*)", "Bash(xargs:*)", "Bash(sudo apt:*)"]}})
+    out = run(home)
+    assert [(f.severity, f.details["settings"]) for f in out] == [
+        ("medium", ['permissions.allow "Bash(python3:*)", "Bash(xargs:*)"'])]
+    assert "python3, bash, env and the like run whatever they're given" in out[0].description
+    write(home / ".claude" / "settings.local.json", {"permissions": {"allow": ["Bash(*)"]}})
+    assert "run whatever they're given" not in run(home)[0].description
+    write(home / ".claude" / "settings.local.json", {"permissions": {"allow": ["Bash(*)", "Bash(env:*)"]}})
+    assert "run whatever they're given" in run(home)[0].description
 
 
 # ── Login files and the environment ──
@@ -568,9 +908,15 @@ def test_no_secret_value_appears_anywhere(home, tmp_path):
     write(home / ".bashrc", "export OPENAI_API_KEY=%s\nalias g='GEMINI_API_KEY=%s gemini --yolo'\n"
                             % (OPENAI_KEY, GEMINI_KEY))
     write(home / ".config" / "fish" / "config.fish", "set -Ux CLAUDE_CODE_OAUTH_TOKEN %s\n" % OAUTH_TOKEN)
+    write(home / ".config" / "fish" / "fish_variables",
+          "SETUVAR --export ANTHROPIC_API_KEY:%s\n" % fish_escape(ANTHROPIC_KEY))
+    write(home / ".zshrc", "# export ANTHROPIC_API_KEY=%s\nexport OPENAI_API_KEY=${OPENAI_API_KEY:-%s}\n"
+                           % (ANTHROPIC_KEY, OPENAI_KEY))
     out = run(home, {"ANTHROPIC_API_KEY": ANTHROPIC_KEY, "CLAUDE_CODE_OAUTH_TOKEN": OAUTH_TOKEN})
-    assert len(out) == 8   # 2 in settings, the login file, 3 in .bashrc, 1 in fish, the environment note
+    # 2 in settings, the login file, 3 in .bashrc, 1 in fish, 1 in fish_variables, 2 in .zshrc, the environment note
+    assert len(out) == 11
     never_shown(out)
+    never_shown(out, fish_escape(ANTHROPIC_KEY))
 
 
 # ── Wired into the scanner and the docs ──

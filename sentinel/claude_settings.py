@@ -50,7 +50,7 @@ def known_projects(home: Path) -> list:
         return []
     try:
         return [p for p in (json.loads(claude.read_text()).get("projects") or {}) if Path(p).is_dir()]
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         return []
 
 
@@ -105,7 +105,7 @@ def check_claude_settings(finding, home: Path = None) -> list:
         seen.add(real)
         try:
             data = json.loads(path.read_text(errors="replace"))
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, RecursionError) as e:  # RecursionError: JSON nested too deep to parse
             out.append(finding("info", "Claude Code settings not checked: %s" % path,
                                "Sereno couldn't read it (%s), so its hooks weren't checked." % type(e).__name__,
                                "Check that the file is valid JSON.", {"path": str(path)}))
