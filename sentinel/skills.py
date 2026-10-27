@@ -257,6 +257,17 @@ class Intention:
     last_run: str = ""
 
 
+# How early a periodic intention may count as due (2026-10-27, found from Ember's guardian log). last_run is stamped
+# when the chain finishes, and cron starts the guardian on the same period as the intervals, so at the next slot the
+# elapsed time fell a few seconds short and every check waited one extra slot: 4 h checks ran every 8 h, 8 h every
+# 12 h, 24 h every 28 h. The grace is capped at a tenth of the interval, so a short interval can't fire every run.
+DUE_GRACE_SECONDS = 300
+
+
+def due_grace(interval_seconds: int) -> int:
+    return min(DUE_GRACE_SECONDS, interval_seconds // 10)
+
+
 class BDIEngine:
     """Beliefs-Desires-Intentions engine for proactive security.
 
@@ -302,7 +313,7 @@ class BDIEngine:
                 else:
                     last = datetime.fromisoformat(intention.last_run)
                     elapsed = (now - last).total_seconds()
-                    if elapsed >= intention.interval_seconds:
+                    if elapsed >= intention.interval_seconds - due_grace(intention.interval_seconds):
                         due.append(intention)
         return due
 
