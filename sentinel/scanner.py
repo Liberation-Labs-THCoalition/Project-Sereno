@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .paths import skip_list, state_folder, walk
+from .paths import skip_list, state_folder, state_folder_note, walk
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,7 @@ class ScanResult:
     # wasn't set (2026-10-28: Ember's manual scans read ~/.sentinel for days, SENTINEL_HOME being set only on cron)
     state_folder: str = ""
     state_folder_default: bool = False
+    state_folder_note: str = ""   # the same in words, as the header shows it (paths.state_folder_note)
 
     @property
     def critical_count(self) -> int:
@@ -106,10 +107,11 @@ class ScanResult:
             f"Platform: {self.platform}",
             f"Checks: {self.checks_run} run, {self.checks_clean} clean",
         ]
-        if self.state_folder:
+        if self.state_folder_note:
+            lines.append(f"State folder: {self.state_folder_note}")
+        elif self.state_folder:
             lines.append(f"State folder: {self.state_folder}"
-                         + (" (the default: SENTINEL_HOME isn't set)" if self.state_folder_default
-                            else " (from SENTINEL_HOME)"))
+                         + (" (the default)" if self.state_folder_default else " (from SENTINEL_HOME)"))
         lines.append("")
         notes = len(self.findings) - len(self.issues)
         if not self.findings:
@@ -192,7 +194,8 @@ def check_npm_supply_chain(known_bad: dict | None = None, skip=None) -> list[Fin
             continue
         candidates = []
         for entry in entries:
-            if entry.name.startswith("@") and entry.is_dir() and not skip.covers(entry):   # a scope linked away
+            # a scope folder may be a link into a skipped folder: checked before it's asked whether it's a folder
+            if entry.name.startswith("@") and not skip.covers(entry) and entry.is_dir():
                 try:
                     candidates += [(f"{entry.name}/{pkg.name}", pkg, entry.name) for pkg in entry.iterdir()]
                 except OSError:
@@ -202,7 +205,8 @@ def check_npm_supply_chain(known_bad: dict | None = None, skip=None) -> list[Fin
         for full_name, pkg, scope in candidates:
             if full_name not in listed and scope not in scopes:
                 continue
-            if skip.covers(pkg):   # a linked package (npm link, pnpm) whose files are in a skipped folder
+            # a linked package (npm link, pnpm), or its package.json, whose files are in a skipped folder
+            if skip.covers(pkg / "package.json"):
                 continue
             version = _npm_version(pkg)
             finding = _npm_verdict(full_name, version, listed.get(full_name), scope in scopes)
@@ -355,7 +359,7 @@ def check_persistence(skip=None) -> list[Finding]:
         )
 
     for path, severity, label in persistence_paths:
-        if path.exists():
+        if not skip.covers(path) and path.exists():
             findings.append(Finding(
                 check="persistence",
                 severity=severity,
@@ -400,7 +404,7 @@ def check_persistence(skip=None) -> list[Finding]:
             if name == "sysmon.py" and ("site-packages" in str(found)
                                         or any(safe in str(found.parent) for safe in sysmon_safe_parents)):
                 continue
-            if _payload_corroborated(found):
+            if _payload_corroborated(found, skip):
                 findings.append(Finding(
                     check="persistence",
                     severity="critical",
@@ -511,7 +515,7 @@ def _persistence_files(home: Path, skip):
                 payloads[entry].append(Path(dirpath) / entry)
         if ".vscode" in dirnames:
             candidate = Path(dirpath) / ".vscode" / "tasks.json"
-            if candidate.is_file() and not skip.covers(candidate):   # tasks.json may link into a skipped folder
+            if not skip.covers(candidate) and candidate.is_file():   # tasks.json may link into a skipped folder
                 tasks.append(candidate)
     return payloads, tasks
 
@@ -550,10 +554,11 @@ PAYLOAD_DISTINCTIVE = ("router_runtime.js", "router_init.js", "tanstack_runner.j
 PAYLOAD_GENERIC = ("setup.mjs", "sysmon.py")
 
 
-def _payload_corroborated(path: Path) -> bool:
+def _payload_corroborated(path: Path, skip=None) -> bool:
     """A generic payload name counts as the worm's when a distinctive payload sits in the same folder, or the file
-    names one (or the worm's token monitor)."""
-    if any((path.parent / n).exists() for n in PAYLOAD_DISTINCTIVE):
+    names one (or the worm's token monitor). A neighbour that links into a skipped folder isn't looked at."""
+    skip = skip_list(skip)
+    if any(not skip.covers(path.parent / n) and (path.parent / n).exists() for n in PAYLOAD_DISTINCTIVE):
         return True
     try:
         text = path.read_text(errors="replace")[:200_000]
@@ -643,10 +648,11 @@ def check_credentials(skip=None) -> list[Finding]:
     """Check for exposed credentials in common locations. skip: the folders not to enter (sentinel/paths.py)."""
     findings = []
     home = _home()
+    skip = skip_list(skip)
 
     # .npmrc with tokens
     npmrc = home / ".npmrc"
-    if npmrc.exists():
+    if not skip.covers(npmrc) and npmrc.exists():
         try:
             content = npmrc.read_text()
             if "authToken" in content or "_auth" in content:
@@ -798,6 +804,7 @@ class SentinelScanner:
             duration_ms=0,
             state_folder=str(state),
             state_folder_default=default,
+            state_folder_note=state_folder_note(),
         )
         skip = skip_list(self._skip)
 

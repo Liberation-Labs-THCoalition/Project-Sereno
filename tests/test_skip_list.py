@@ -228,7 +228,8 @@ def test_a_link_to_a_file_in_a_skipped_folder_is_not_read(home, visits):
     skip = skip_other(home)
     assert _credentials(home, skip) == []
     assert _credentials(home, SkipList()) != []   # control: the link is read when nothing is skipped
-    assert skip.notes()[0][4]["skipped_files"] == 1
+    # counted as the folder it leads into, once (2026-10-29: each link into a root counted as a thing of its own)
+    assert (skip.notes()[0][4]["skipped_folders"], skip.notes()[0][4]["skipped_files"]) == (1, 0)
 
 
 def test_a_linked_node_modules_in_a_skipped_folder_is_not_scanned(home, visits):

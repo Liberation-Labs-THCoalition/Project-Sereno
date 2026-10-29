@@ -11,14 +11,18 @@ From Ember's guardian install on a shared home (2026-10-26..28); Nexus found the
   names landed in the log. List folders in `$SENTINEL_HOME/skip.json` (`["~/agents/*", "!~/agents/yours"]` skips every
   agent's folder but your own), or pass `--skip PATH`, and every search leaves them out, without entering them: package
   folders, payload files, VS Code tasks, Python startup files, `.env` files, git repositories, Claude Code and MCP
-  project settings (also those `~/.claude.json` lists), the baseline, and the profile's counts. Links into a listed
-  folder are resolved first, so they don't get around it. A scan that skipped anything says so in one note ("Not
-  checked: 3 folders on your skip list"); an entry that matches nothing is a note too; a `skip.json` that can't be read
-  makes Sereno search none of your folders and say so (high), rather than risk entering the ones you listed. With no
-  file, nothing changes.
+  project settings (also those `~/.claude.json` lists, and the servers it keeps for them), the baseline, the profile's
+  counts, and the files read at fixed places (`~/.bashrc`, `~/.claude.json`, `CLAUDE_CONFIG_DIR`...) when one is
+  listed or links into a listed folder. Each path is checked before Sereno's first look at it, so nothing inside a
+  listed folder is looked at, and it counts as inside by the path as written (a link in the folder pointing elsewhere
+  is still in it), by where it leads (a link into the folder doesn't get around it), or by what the folder is (a listed
+  link to it, or another case of its name on a Mac). A scan that skipped anything says so in one note ("Not checked:
+  3 folders on your skip list", each folder once); an entry that matches nothing is a note too; a `skip.json` that
+  can't be read makes Sereno search none of your folders and say so (high), rather than risk entering the ones you
+  listed. With no file, nothing changes.
 - **Every scan names its state folder.** The report's header, the JSON (`state_folder`, `state_folder_default`), the
   guardian's last line and its run records say which folder Sereno read, and when it's the default because
-  `SENTINEL_HOME` isn't set. Ember's scans by hand read `~/.sentinel` for days, `SENTINEL_HOME` being set only on the
+  `SENTINEL_HOME` isn't set (or is empty). Ember's scans by hand read `~/.sentinel` for days, `SENTINEL_HOME` being set only on the
   cron line.
 - **A package listed without versions is "check the version", not a high.** Such an entry can't say your version is a
   bad one, so it's now medium, naming your version and saying the list doesn't say which releases are bad. An entry

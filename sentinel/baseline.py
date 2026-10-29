@@ -177,14 +177,19 @@ def _file_permissions(path: Path) -> str:
 def _scan_path(root: Path, max_depth: int = 5, skip=None) -> list[FileRecord]:
     """Scan a directory tree and record file states. Nothing on the skip list is entered or read (sentinel/paths.py)."""
     records = []
-    root = root.expanduser().resolve()
     skip = skip_list(skip)
+    root = root.expanduser()
+    # Checked as given, before resolving it looks anything up: a watched path can be a link into a skipped folder, or
+    # sit in one and link out of it (2026-10-29)
+    if skip.covers(root):
+        return records
+    root = root.resolve()
 
     if not root.exists():
         return records
 
     if root.is_file():
-        if not _should_skip(root) and not skip.covers(root):
+        if not _should_skip(root):
             try:
                 st = root.stat()
                 records.append(FileRecord(
@@ -310,8 +315,8 @@ class FileBaseline:
         for path_str, record in self._records.items():
             # A record the skip rules now exclude (a Claude Code transcript in an older baseline) isn't "gone"
             # and one in a folder on the skip list wasn't looked at
-            if (path_str not in current_paths and not _should_skip(Path(path_str))
-                    and not skip.covers(path_str, record=False)):
+            if (path_str not in current_paths and not skip.covers(path_str, record=False)
+                    and not _should_skip(Path(path_str))):
                 changes.append(FileChange(
                     path=path_str,
                     change_type="removed",

@@ -169,13 +169,14 @@ def profile_system(skip=None) -> SystemProfile:
             break
     p.node_modules_dirs = nm_count
 
-    # SSH keys
+    # SSH keys (names only; nothing on the skip list, or linked into it, is looked at)
     ssh_dir = home / ".ssh"
-    if ssh_dir.exists():
+    if not skip.covers(ssh_dir) and ssh_dir.exists():
         p.ssh_keys = sum(1 for f in ssh_dir.iterdir()
-                         if f.is_file() and f.suffix != ".pub" and f.name not in ("known_hosts", "config", "authorized_keys"))
+                         if f.suffix != ".pub" and f.name not in ("known_hosts", "config", "authorized_keys")
+                         and not skip.covers(f) and f.is_file())
 
-    p.has_npmrc = (home / ".npmrc").exists()
+    p.has_npmrc = not skip.covers(home / ".npmrc") and (home / ".npmrc").exists()
 
     env_count = 0
     for dirpath, dirnames, filenames in walk(home, skip):
@@ -191,7 +192,7 @@ def profile_system(skip=None) -> SystemProfile:
     p.claude_code_installed = claude_bin is not None
 
     claude_settings = home / ".claude" / "settings.json"
-    if claude_settings.exists():
+    if not skip.covers(claude_settings) and claude_settings.exists():
         try:
             data = json.loads(claude_settings.read_text())
             hooks = data.get("hooks", {})

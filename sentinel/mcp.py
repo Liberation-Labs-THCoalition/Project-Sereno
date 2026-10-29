@@ -20,6 +20,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from .claude_settings import known_projects
 from .paths import skip_list, walk
 from .redact import redact
 
@@ -227,7 +228,8 @@ def project_configs(home: Path, extra_roots=(), skip=None) -> list:
         if len(depth) >= WALK_DEPTH:
             dirs[:] = []
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
-        if any((Path(root) / n).is_file() for n, _, _ in names):
+        # .mcp.json, or .cursor or .vscode, may be a link into a skipped folder: checked before it's looked up
+        if any(not skip.covers(Path(root) / n) and (Path(root) / n).is_file() for n, _, _ in names):
             roots.add(Path(root))
     roots |= {Path(r) for r in extra_roots}
     return [(r / n, keys, tool) for r in sorted(roots) for n, keys, tool in names
@@ -281,19 +283,17 @@ def check_mcp_servers(finding, home: Path = None, known_bad_npm: dict = None, kn
     home = home or Path.home()
     known_bad_npm = known_bad_npm or {}
     known_bad_pip = known_bad_pip or {}
+    skip = skip_list(skip)
     out = []
     seen = set()
-    entries = [(p, k, t) for p, k, t in config_files(home) if p.is_file()]
-    claude = home / ".claude.json"
-    extra = []
-    if claude.is_file():
-        try:
-            extra = [p for p in (json.loads(claude.read_text()).get("projects") or {}) if Path(p).is_dir()]
-        except (OSError, ValueError, AttributeError, RecursionError):
-            extra = []
-    entries += project_configs(home, extra, skip)
+    # Every config is checked against the skip list before it's looked at (one may link into a skipped folder), and
+    # so is every project ~/.claude.json lists, which on a shared account includes the other agents' (2026-10-29)
+    entries = [(p, k, t) for p, k, t in config_files(home) if not skip.covers(p) and p.is_file()]
+    entries += project_configs(home, known_projects(home, skip), skip)
     codex = home / ".codex" / "config.toml"
-    for path, keys, tool in entries + ([(codex, None, "Codex")] if codex.is_file() else []):
+    if not skip.covers(codex) and codex.is_file():
+        entries.append((codex, None, "Codex"))
+    for path, keys, tool in entries:
         real = os.path.realpath(path)
         if real in seen:
             continue
@@ -315,6 +315,8 @@ def check_mcp_servers(finding, home: Path = None, known_bad_npm: dict = None, kn
             continue
         tracked = "unasked"
         for project, name, server in servers:
+            if project and skip.covers(project):   # ~/.claude.json's entry for a project on the skip list
+                continue
             where = "%s, server \"%s\"%s" % (tool, name, (" (project %s)" % project) if project else "")
             pkg = launched_package(server.get("command"), server.get("args"))
             if pkg and not pkg["pinned"]:
