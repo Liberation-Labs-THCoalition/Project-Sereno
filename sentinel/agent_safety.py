@@ -31,6 +31,7 @@ from pathlib import Path
 
 from .claude_settings import known_projects, project_files
 from .mcp import git_ls_file, strip_jsonc
+from .paths import skip_list
 from .redact import redact
 
 # Agent credentials people put in shell files. Claude Code reads the first three (the OAuth token that
@@ -282,15 +283,18 @@ def claude_prompts_off(data, scope: str) -> list:
     return out
 
 
-def _claude_files(home: Path, environ) -> list:
+def _claude_files(home: Path, environ, skip=None) -> list:
     """(path, scope) for every Claude Code settings file to read: yours (in ~/.claude and $CLAUDE_CONFIG_DIR), managed,
-    and the project ones the persistence check finds (sentinel/claude_settings.py)."""
+    and the project ones the persistence check finds (sentinel/claude_settings.py), outside the skip list's folders:
+    one on the list or linked into it is left out before it's looked at."""
+    skip = skip_list(skip)
     files = []
     for d in _config_dirs(home / ".claude", environ.get("CLAUDE_CONFIG_DIR")):
         files += [(d / "settings.json", "user"), (d / "settings.local.json", "user")]
     files += [(p, "managed") for p in MANAGED_FILES]
+    files = [(p, scope) for p, scope in files if not skip.covers(p)]
     files += [(p, "project" if p.name == "settings.json" else "local")
-              for p, _ in project_files(home, known_projects(home))]
+              for p, _ in project_files(home, known_projects(home, skip), skip)]
     return files
 
 
@@ -367,9 +371,9 @@ def _claude_finding(finding, path: Path, scope: str, items: list):
                    % (path, root, keep, undo), details)
 
 
-def _claude_findings(finding, home: Path, environ) -> list:
+def _claude_findings(finding, home: Path, environ, skip=None) -> list:
     out, seen = [], set()
-    for path, scope in _claude_files(home, environ):
+    for path, scope in _claude_files(home, environ, skip):
         real = os.path.realpath(str(path))
         if real in seen:
             continue
@@ -463,10 +467,13 @@ def codex_unasked_unsandboxed(tables: dict) -> list:
     return out
 
 
-def _codex_findings(finding, home: Path, environ) -> list:
+def _codex_findings(finding, home: Path, environ, skip=None) -> list:
+    skip = skip_list(skip)
     out, seen = [], set()
     for d in _config_dirs(home / ".codex", environ.get("CODEX_HOME")):
         path = d / "config.toml"
+        if skip.covers(path):
+            continue
         real = os.path.realpath(str(path))
         if real in seen:
             continue
@@ -516,8 +523,10 @@ def _json_settings(finding, path: Path, what: str):
         return None, _not_checked(finding, path, e, what)
 
 
-def _gemini_findings(finding, home: Path) -> list:
+def _gemini_findings(finding, home: Path, skip=None) -> list:
     path = home / ".gemini" / "settings.json"
+    if skip_list(skip).covers(path):
+        return []
     data, problem = _json_settings(finding, path, "its tool approvals")
     if problem:
         return [problem]
@@ -534,10 +543,13 @@ def _gemini_findings(finding, home: Path) -> list:
                     {"path": str(path), "rules": rules})]
 
 
-def _vscode_findings(finding, home: Path) -> list:
+def _vscode_findings(finding, home: Path, skip=None) -> list:
+    skip = skip_list(skip)
     out = []
     for rel in VSCODE_FILES:
         path = home / rel
+        if skip.covers(path):
+            continue
         data, problem = _json_settings(finding, path, "its agent approval settings")
         if problem:
             out.append(problem)
@@ -1043,16 +1055,22 @@ def _flag_finding(finding, path: Path, lineno: int, code: str, flags: list):
         {"path": str(path), "line": lineno, "flags": ["%s %s" % f for f in flags], "name": name})
 
 
-def _shell_files(home: Path) -> list:
-    files = [home / f for f in SHELL_FILES]
+def _shell_files(home: Path, skip=None) -> list:
+    """The shell startup files to read. The folders of them (SHELL_DIRS) are listed only when they're not on the skip
+    list, and a file that is on it, or links into it, is left out before it's looked at."""
+    skip = skip_list(skip)
+    files = [home / f for f in SHELL_FILES if not skip.covers(home / f)]
     for d, pattern in SHELL_DIRS:
-        files += sorted(p for p in (home / d).glob(pattern) if p.is_file())
+        if skip.covers(home / d):
+            continue
+        files += sorted(p for p in (home / d).glob(pattern) if not skip.covers(p) and p.is_file())
     return files
 
 
-def _shell_findings(finding, home: Path) -> list:
+def _shell_findings(finding, home: Path, skip=None) -> list:
+    skip = skip_list(skip)
     out = []
-    for path in _shell_files(home):
+    for path in _shell_files(home, skip):
         try:
             text = _read(path)
         except OSError as e:
@@ -1073,6 +1091,8 @@ def _shell_findings(finding, home: Path) -> list:
                 if _looks_like_key(_literal(value)):
                     out.append(_commented_key_finding(finding, name, path, lineno))
     path = home / FISH_UNIVERSAL
+    if skip.covers(path):
+        return out
     try:
         text = _read(path)
     except OSError as e:
@@ -1095,11 +1115,14 @@ def _login_files(home: Path, environ) -> list:
     return files
 
 
-def _login_file_findings(finding, home: Path, environ) -> list:
+def _login_file_findings(finding, home: Path, environ, skip=None) -> list:
     """Agent login files that other accounts can read or write. Only their permissions are read, never their
-    contents."""
+    contents, and not even those for one on the skip list or linked into it."""
+    skip = skip_list(skip)
     out, seen = [], set()
     for path, tool in _login_files(home, environ):
+        if skip.covers(path):
+            continue
         real = os.path.realpath(str(path))
         if real in seen:
             continue
@@ -1138,12 +1161,16 @@ def _environment_findings(finding, environ) -> list:
 
 # ── The check ──
 
-def check_agent_safety(finding, home: Path = None, environ=None) -> list:
+def check_agent_safety(finding, home: Path = None, environ=None, skip=None) -> list:
     """Findings for AI agents set to skip their safety prompts and for agent logins left exposed. `finding(severity,
     title, description, remediation, details)` builds one (the scanner passes it, as for mcp.py). environ defaults to
-    os.environ; it's where CLAUDE_CONFIG_DIR, CODEX_HOME and the credential variables are looked up."""
+    os.environ; it's where CLAUDE_CONFIG_DIR, CODEX_HOME and the credential variables are looked up. skip: the folders
+    not to enter (sentinel/paths.py): every file read here is checked against it first, including a project settings
+    file the walk finds, a known project, a shell file and the folders of them."""
     home = home or Path.home()
     environ = os.environ if environ is None else environ
-    return (_claude_findings(finding, home, environ) + _codex_findings(finding, home, environ)
-            + _gemini_findings(finding, home) + _vscode_findings(finding, home) + _shell_findings(finding, home)
-            + _login_file_findings(finding, home, environ) + _environment_findings(finding, environ))
+    skip = skip_list(skip)
+    return (_claude_findings(finding, home, environ, skip) + _codex_findings(finding, home, environ, skip)
+            + _gemini_findings(finding, home, skip) + _vscode_findings(finding, home, skip)
+            + _shell_findings(finding, home, skip) + _login_file_findings(finding, home, environ, skip)
+            + _environment_findings(finding, environ))

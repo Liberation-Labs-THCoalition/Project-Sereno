@@ -114,12 +114,14 @@ class TestNpmSupplyChain:
         assert [f.severity for f in findings] == ["critical"]
         assert findings[0].details["version"] == "0.3.0"
 
-    def test_listed_without_versions_is_high(self, tmp_path, monkeypatch):
+    def test_listed_without_versions_is_medium_check_the_version(self, tmp_path, monkeypatch):
+        # 2026-10-28: a version-less entry was a high that read as "this version is compromised"; the list can't say
         self._install(tmp_path, "cross-stitch", "1.4.0")
         self._install(tmp_path, "@corp/tool", "3.0.0")
         findings = self._scan(tmp_path, monkeypatch, {"scopes": [], "packages": {"cross-stitch": [], "@corp/tool": []}})
-        assert sorted((f.severity, f.details["version"]) for f in findings) == [("high", "1.4.0"), ("high", "3.0.0")]
+        assert sorted((f.severity, f.details["version"]) for f in findings) == [("medium", "1.4.0"), ("medium", "3.0.0")]
         assert all("osv.dev" in f.description for f in findings)
+        assert all(f.title.startswith("Check the version: ") for f in findings)
 
     def test_listed_package_at_a_clean_version_is_quiet(self, tmp_path, monkeypatch):
         # The exact entry decides: its scope being listed adds no medium on top

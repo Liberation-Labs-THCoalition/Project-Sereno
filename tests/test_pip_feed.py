@@ -18,7 +18,7 @@ FEED = {"_meta": {"name": "test"}, "badpkg": ["1.0.1"], "allbad": []}
 @pytest.mark.parametrize("pkgs,expected", [
     ([("badpkg", "1.0.1")], [("critical", "badpkg")]),
     ([("badpkg", "1.0.2")], []),
-    ([("allbad", "3.2.1")], [("high", "allbad")]),       # skipped entirely before the fix
+    ([("allbad", "3.2.1")], [("medium", "allbad")]),     # skipped entirely before 10-23; high until 10-28
     ([("BadPkg", "1.0.1")], [("critical", "badpkg")]),   # names are lowercased
     ([("_meta", "1")], []),
     ([("fine", "1.0.1")], []),

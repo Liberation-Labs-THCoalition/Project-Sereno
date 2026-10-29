@@ -20,6 +20,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from .claude_settings import known_projects
+from .paths import skip_list, walk
 from .redact import redact
 
 # npx-style launchers check the registry for the newest version when no version is given.
@@ -211,22 +213,27 @@ def config_files(home: Path) -> list:
     return files
 
 
-def project_configs(home: Path, extra_roots=()) -> list:
+def project_configs(home: Path, extra_roots=(), skip=None) -> list:
     """Project-level configs: .mcp.json, .cursor/mcp.json and .vscode/mcp.json, in Claude Code's known projects and
-    anywhere up to WALK_DEPTH folders under home."""
+    anywhere up to WALK_DEPTH folders under home. Nothing in a folder on the skip list is touched (sentinel/paths.py): the
+    walk doesn't enter one, and a config in one (a known project inside it) or linking into one is dropped before it's
+    looked at."""
     names = [(Path(".mcp.json"), [("mcpServers",)], "project (.mcp.json)"),
              (Path(".cursor") / "mcp.json", [("mcpServers",)], "project (Cursor)"),
              (Path(".vscode") / "mcp.json", [("servers",)], "project (VS Code)")]
+    skip = skip_list(skip)
     roots = set()
-    for root, dirs, _files in os.walk(str(home)):
+    for root, dirs, _files in walk(home, skip):
         depth = Path(root).relative_to(home).parts
         if len(depth) >= WALK_DEPTH:
             dirs[:] = []
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
-        if any((Path(root) / n).is_file() for n, _, _ in names):
+        # .mcp.json, or .cursor or .vscode, may be a link into a skipped folder: checked before it's looked up
+        if any(not skip.covers(Path(root) / n) and (Path(root) / n).is_file() for n, _, _ in names):
             roots.add(Path(root))
     roots |= {Path(r) for r in extra_roots}
-    return [(r / n, keys, tool) for r in sorted(roots) for n, keys, tool in names if (r / n).is_file()]
+    return [(r / n, keys, tool) for r in sorted(roots) for n, keys, tool in names
+            if not skip.covers(r / n) and (r / n).is_file()]
 
 
 def git_ls_file(path: Path):
@@ -269,25 +276,24 @@ def _read_toml_servers(path: Path):
 
 # ── The check ──
 
-def check_mcp_servers(finding, home: Path = None, known_bad_npm: dict = None, known_bad_pip: dict = None):
+def check_mcp_servers(finding, home: Path = None, known_bad_npm: dict = None, known_bad_pip: dict = None, skip=None):
     """Findings for unpinned MCP launchers and plain-text secrets in MCP configs. `finding(severity, title,
-    description, remediation, details)` builds one (the scanner passes it, so this module imports nothing of it)."""
+    description, remediation, details)` builds one (the scanner passes it, so this module imports nothing of it).
+    skip: the folders not to enter (sentinel/paths.py)."""
     home = home or Path.home()
     known_bad_npm = known_bad_npm or {}
     known_bad_pip = known_bad_pip or {}
+    skip = skip_list(skip)
     out = []
     seen = set()
-    entries = [(p, k, t) for p, k, t in config_files(home) if p.is_file()]
-    claude = home / ".claude.json"
-    extra = []
-    if claude.is_file():
-        try:
-            extra = [p for p in (json.loads(claude.read_text()).get("projects") or {}) if Path(p).is_dir()]
-        except (OSError, ValueError, AttributeError, RecursionError):
-            extra = []
-    entries += project_configs(home, extra)
+    # Every config is checked against the skip list before it's looked at (one may link into a skipped folder), and
+    # so is every project ~/.claude.json lists, which on a shared account includes the other agents' (2026-10-29)
+    entries = [(p, k, t) for p, k, t in config_files(home) if not skip.covers(p) and p.is_file()]
+    entries += project_configs(home, known_projects(home, skip), skip)
     codex = home / ".codex" / "config.toml"
-    for path, keys, tool in entries + ([(codex, None, "Codex")] if codex.is_file() else []):
+    if not skip.covers(codex) and codex.is_file():
+        entries.append((codex, None, "Codex"))
+    for path, keys, tool in entries:
         real = os.path.realpath(path)
         if real in seen:
             continue
@@ -309,6 +315,8 @@ def check_mcp_servers(finding, home: Path = None, known_bad_npm: dict = None, kn
             continue
         tracked = "unasked"
         for project, name, server in servers:
+            if project and skip.covers(project):   # ~/.claude.json's entry for a project on the skip list
+                continue
             where = "%s, server \"%s\"%s" % (tool, name, (" (project %s)" % project) if project else "")
             pkg = launched_package(server.get("command"), server.get("args"))
             if pkg and not pkg["pinned"]:
@@ -325,6 +333,10 @@ def check_mcp_servers(finding, home: Path = None, known_bad_npm: dict = None, kn
                      % (_pinned_example(pkg), path)),
                     {"path": str(path), "server": name, "package": pkg["name"], "launcher": pkg["launcher"],
                      "spec": pkg["spec"]}))
+            elif pkg and pkg["kind"] == "registry":
+                pinned = _pinned_verdict(pkg, known_bad_npm, known_bad_pip, where, path)
+                if pinned:
+                    out.append(finding(*pinned))
             env = server.get("env") if isinstance(server.get("env"), dict) else {}
             secret_keys = sorted(k for k, v in env.items() if isinstance(v, str) and v and redact(v) != v)
             if secret_keys:
@@ -350,6 +362,51 @@ def _known_bad(pkg: dict, npm: dict, pip: dict) -> bool:
         return name in (npm.get("packages") or {}) or name.split("/")[0] in (npm.get("scopes") or [])
     return re.sub(r"[-_.]+", "-", name).lower() in {re.sub(r"[-_.]+", "-", k).lower() for k in pip
                                                     if not k.startswith("_")}
+
+
+def _listed_versions(pkg: dict, npm: dict, pip: dict):
+    """The bad versions Sereno's list gives for the package (an empty list when it gives none), or None when the
+    package itself isn't listed. A listed npm scope alone doesn't count here: it names no versions."""
+    if pkg["ecosystem"] == "npm":
+        return (npm.get("packages") or {}).get(pkg["name"])
+    norm = re.sub(r"[-_.]+", "-", pkg["name"]).lower()
+    return next((v for k, v in pip.items() if not k.startswith("_") and re.sub(r"[-_.]+", "-", k).lower() == norm),
+                None)
+
+
+def _pinned_version(pkg: dict) -> str:
+    """The exact version a pinned registry spec names: some-server@1.4.2, @scope/server@1.4.2, name==1.4.2."""
+    if pkg["ecosystem"] == "npm":
+        return pkg["spec"].rsplit("@", 1)[1] if "@" in pkg["spec"][1:] else ""
+    m = re.match(r"^[A-Za-z0-9._\-]+(?:\[[^\]]*\])?\s*(?:==|@)\s*([^\s;,]+)$", pkg["spec"])
+    return m.group(1) if m else ""
+
+
+def _pinned_verdict(pkg: dict, npm: dict, pip: dict, where: str, path: Path):
+    """(severity, title, description, remediation, details) for a server pinned to a version of a listed package, or
+    None (2026-10-28). An entry with versions matches only those: a pinned bad one is critical, any other is fine. An
+    entry without versions can't say the pinned one is bad: medium, asking you to check it."""
+    versions = _listed_versions(pkg, npm, pip)
+    version = _pinned_version(pkg)
+    if versions is None or not version:
+        return None
+    details = {"path": str(path), "package": pkg["name"], "version": version, "spec": pkg["spec"],
+               "versions_listed": bool(any(versions))}
+    if any(versions):
+        if version not in versions:
+            return None
+        return ("critical", "MCP server pinned to a compromised release: %s %s (%s)" % (pkg["name"], version, where),
+                ("%s starts %s version %s, which is on Sereno's list of compromised releases. It runs every time the "
+                 "tool starts that server, and may steal credentials." % (where, pkg["name"], version)),
+                ("Remove the server from %s, or pin a version the package's advisory says is clean. Then treat the "
+                 "secrets this machine holds as exposed, and rotate them from another device." % path), details)
+    return ("medium", "Check the version: MCP server pinned to %s %s (%s; the list doesn't say which releases are bad)"
+            % (pkg["name"], version, where),
+            ("%s had compromised releases, but Sereno's list doesn't say which versions, so it can't tell whether %s, "
+             "the version %s starts, is one of them. Compare it with the package's advisory (osv.dev lists them)."
+             % (pkg["name"], version, where)),
+            ("If %s is named in the advisory, remove the server from %s or pin a clean version, and rotate the "
+             "secrets this machine holds; if it isn't, nothing to do." % (version, path)), details)
 
 
 def _pinned_example(pkg: dict) -> str:

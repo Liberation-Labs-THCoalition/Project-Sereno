@@ -51,14 +51,14 @@ The commands say `sentinel`, not `sereno`. That's the name of Sereno's code fold
 
 | Check | What it looks for |
 |-------|-------------------|
-| **Supply chain: npm** | Packages in the `node_modules` folders under your home folder that are on Sereno's npm list. How serious a match is depends on how exact the list is. A known-bad version is critical. A listed package whose bad versions aren't given is high. A package that's only under a listed scope, such as `@tanstack`, is medium: most packages in those scopes are fine, so compare your version with the advisory (see Threat Feeds), and if it's a bad one, follow the steps in the finding. |
-| **Supply chain: pip** | Python packages that `pip3 list` shows, checked against Sereno's pip list. That's one Python install: packages in your other virtual environments aren't on it. An exact known-bad version is critical. A listed package whose bad versions aren't given is reported as high, so you can check yours. |
+| **Supply chain: npm** | Packages in the `node_modules` folders under your home folder that are on Sereno's npm list. How serious a match is depends on how exact the list is. A known-bad version is critical; any other version of a package listed with versions isn't reported. A listed package whose bad versions aren't given is medium, titled "Check the version": the finding names your version and says the list doesn't say which releases are bad, so compare it with the advisory. A package that's only under a listed scope, such as `@tanstack`, is medium: most packages in those scopes are fine, so compare your version with the advisory (see Threat Feeds), and if it's a bad one, follow the steps in the finding. |
+| **Supply chain: pip** | Python packages that `pip3 list` shows, checked against Sereno's pip list. That's one Python install: packages in your other virtual environments aren't on it. An exact known-bad version is critical, and other versions of that package aren't reported. A listed package whose bad versions aren't given is medium ("Check the version", naming yours), never a claim that your version is a bad one. |
 | **Persistence** | Ways malware makes itself start again: the Shai-Hulud worm's files anywhere in your home folder (its token monitor, also as a systemd service or macOS LaunchAgent, and its payload files; `setup.mjs` and `sysmon.py` are common names, so alone they're a note, and critical only next to the worm's other files or naming them), VS Code tasks that call them, Claude Code hooks, and Python startup files that run code. More below. |
 | **Processes** | Running programs with names known from malware: the Shai-Hulud token monitor and payloads, cryptominers such as xmrig, and reverse shells. |
 | **Network** | Programs waiting for connections (listening ports), each named where Sereno can tell: "remote desktop (gnome-remote-desktop) on port 3390", not just "port 3390". Every TCP port except 22, 80 and 443: medium if other machines can reach it, info if only this machine can. Remote control that other machines can reach (a remote desktop such as RDP, VNC, NoMachine, RustDesk, AnyDesk or TeamViewer, or SSH on a port other than 22) is high on any TCP port, with how to switch it off. UDP services on ports up to 1024 that other machines can reach, except common ones (DHCP, NTP, NetBIOS), and remote desktops' UDP ports. Tailscale's own listeners on your tailnet addresses are info. |
 | **Credentials** | Tokens in `~/.npmrc` (high), and lines that look like API keys, tokens or passwords in files named `.env` under your home folder (medium). |
 | **Git repos** | Dune-themed branch names, which the Shai-Hulud worm used to carry stolen data out, in the git repositories under your home folder. |
-| **MCP servers** | AI coding tools (Claude Code, Claude Desktop, Cursor, VS Code, Windsurf, Gemini CLI, and Codex on Python 3.11+) starting MCP servers with no fixed version (`npx -y some-server`, `uvx some-server`): medium, or high if the package is on Sereno's lists. API keys written in plain text in their configs, named, never shown: medium, or high if git tracks the file. Project `.mcp.json`, `.cursor/mcp.json` and `.vscode/mcp.json` files count too. |
+| **MCP servers** | AI coding tools (Claude Code, Claude Desktop, Cursor, VS Code, Windsurf, Gemini CLI, and Codex on Python 3.11+) starting MCP servers with no fixed version (`npx -y some-server`, `uvx some-server`): medium, or high if the package is on Sereno's lists. A server pinned to a version that's on the lists (`uvx litellm==1.82.7`): critical; pinned to a package listed without versions: medium, "Check the version". API keys written in plain text in their configs, named, never shown: medium, or high if git tracks the file. Project `.mcp.json`, `.cursor/mcp.json` and `.vscode/mcp.json` files count too. |
 | **AI agent safety** | AI coding agents set to skip their own safety prompts: Claude Code's bypass mode, its warning before bypass mode turned off, every project MCP server approved, or every shell command allowed (`Bash`, `Bash(*)`, or a program that runs whatever it's given, such as `Bash(python3:*)` or `Bash(env *)`, from Claude Code's own list); Codex set to never ask with no sandbox; VS Code's global auto-approve; Gemini CLI letting every shell command through; and shell aliases, functions and fish abbreviations that start `claude`, `codex` or `gemini` with their skip flags (also behind a program that starts another, such as `sudo`, `timeout`, `npx`, `op run --`, `mise exec --`, `watch` or `su -c`, and inside `eval` or `sh -c`). In your own settings these are advice (medium): what it means, and how to turn the prompt back on. In a project folder's Claude Code settings they're high, because a repo someone else wrote can switch your prompts off. Agent logins left exposed: a login file other accounts can read (`~/.claude/.credentials.json`, Codex's `auth.json`, Gemini CLI's `oauth_creds.json`), or an agent API key or token (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY` and two more) written into a shell startup file or your Claude Code settings: high, named, never shown. |
 
 Two more checks run outside `scan`. Both are part of `all` and of the guardian:
@@ -97,9 +97,39 @@ Not covered by the SSH rule: after the SSH service restarts while a root login s
 
 A port whose program Sereno can't see is still reported, never treated as clean. If Sereno can't list the ports at all, it says "Listening ports not checked" (medium). On macOS, if `netstat` fails but `lsof` works, it says "Listening ports partly checked" (medium): without sudo, `lsof` shows only your own programs.
 
+## Folders Sereno doesn't enter (the skip list)
+
+On a machine you share, someone else's folders under your home aren't yours to search. Several AI agents kept under one account (`~/agents/<name>/`) is the case this was built for: Sereno's findings never carry values, but paths and variable names from someone else's folder, in a log you read, still cross a line. List those folders, and every search Sereno makes through your home (package folders, payload files, VS Code tasks, Python startup files, `.env` files, git repositories, Claude Code and MCP project settings, the file-integrity baseline, and the profile's counts) leaves them out: it doesn't enter them at all, rather than entering and hiding what it found. Nothing inside a listed folder is even looked at: Sereno checks each path against the list before its first look, not after.
+
+A path counts as in a listed folder three ways: by the path as written (a link inside the folder that points elsewhere is still inside it, so a project of theirs that `~/.claude.json` lists, linked out to `/data`, isn't read); by where it really leads (a link of yours into the folder doesn't get around it); and by what the folder is, whatever it's called (a link you listed, a mount of it, or `~/Agents/Nexus` for `~/agents/nexus` on a Mac, whose disk ignores case).
+
+The list is `$SENTINEL_HOME/skip.json` (default `~/.sentinel/skip.json`), a JSON list of paths. `~` means your home; a relative path is taken from your home; `*` and `?` match names (not names starting with a dot); an entry starting with `!` takes a path back off the list. With no file, nothing is skipped.
+
+```json
+["~/agents/nexus", "~/agents/lyra"]
+```
+
+On a shared home, skip every agent's folder but your own. The `*` picks up an agent who arrives later, too:
+
+```json
+["~/agents/*", "!~/agents/ember"]
+```
+
+The guardian reads the same file, so set `SENTINEL_HOME` the same way for it and for your own runs (each run names the state folder it used; see below). For one run, add `--skip PATH` (as many as you like) to `scan`, `all`, `profile` or `baseline`; it's added to the file's list, and a relative path is taken from the folder you're in:
+
+```bash
+python3 -m sentinel scan --skip ~/agents/nexus --skip ~/agents/lyra
+```
+
+A skip is never silent. A scan that skipped anything carries one note, "Not checked: 3 folders on your skip list", naming the listed paths it matched (never anything inside them): that scan says nothing about those folders. Each listed folder counts once, however many paths led into it, and one that isn't there isn't counted. An entry that matches nothing is a note too, once per scan. If `skip.json` can't be read, or isn't a list of paths, Sereno can't promise to stay out of the folders you meant, so it searches none of the folders under your home and says so as a high finding ("Skip list unreadable"); fix or remove the file.
+
+Files Sereno reads at fixed places follow the list too: `~/.bashrc`, `~/.npmrc`, `~/.claude/settings.json`, `~/.claude.json` itself, and the agent folders named by `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. They're yours, so they're read as usual; one you list, or one that's a link into a listed folder, isn't, and the note counts it. In `~/.claude.json`, the MCP servers it keeps for a project in a listed folder aren't reported. The hardening advice follows the list the same way (`harden --skip PATH` too): an `~/.ssh` or `~/.npmrc` linked into a listed folder isn't looked at, and the advice ends with the note. When `~/.npmrc` is listed or links into a listed folder, the profile runs npm with an empty user config, so npm doesn't read it either.
+
+**Which state folder a scan used.** Every scan's report starts with the state folder it read (`expected.json`, `skip.json`), and says when that's the default because `SENTINEL_HOME` isn't set (or is set to nothing: "is empty"); the JSON has `state_folder` and `state_folder_default`. If you set `SENTINEL_HOME` only on a cron line, a scan you run by hand reads `~/.sentinel` instead, and the header shows it.
+
 ## What Sereno reads, and what leaves your machine
 
-Sereno reads. It doesn't change your files. It writes only its own files in `$SENTINEL_HOME` (default `~/.sentinel`), plus a log or results file if you ask for one. It runs as you, so it sees what you can see, and it looks mostly in your home folder.
+Sereno reads. It doesn't change your files. It writes only its own files in `$SENTINEL_HOME` (default `~/.sentinel`), plus a log or results file if you ask for one. It runs as you, so it sees what you can see, and it looks mostly in your home folder, outside the folders on your skip list (see above).
 
 | Part | What it reads |
 |------|---------------|
@@ -187,7 +217,7 @@ crontab -e
 # Add: 0 */4 * * * cd /path/to/Project-Sereno && PYTHONPATH=. python3 -m sentinel.guardian >> ~/.sentinel/guardian.log 2>&1
 ```
 
-Sereno keeps all its state in one directory: `$SENTINEL_HOME`, or `~/.sentinel` when it isn't set. An install from before 2026-10-17 that kept its guardian state in `~/.ember` had its baseline and profile in `~/.sentinel`: copy `baseline.json` and `profile.json` into `~/.ember` first, then set `SENTINEL_HOME=~/.ember`. Otherwise the guardian keeps its beliefs but reports that no baseline exists.
+Sereno keeps all its state in one directory: `$SENTINEL_HOME`, or `~/.sentinel` when it isn't set. The guardian's last line, `--status`, and each run record in `guardian_runs/` name the folder it used. An install from before 2026-10-17 that kept its guardian state in `~/.ember` had its baseline and profile in `~/.sentinel`: copy `baseline.json` and `profile.json` into `~/.ember` first, then set `SENTINEL_HOME=~/.ember`. Otherwise the guardian keeps its beliefs but reports that no baseline exists.
 
 What the guardian does on each run:
 - **Packages and persistence**, every 4 hours (packages includes the MCP server check; persistence includes running

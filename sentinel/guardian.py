@@ -24,7 +24,7 @@ from .skills import (
     SkillRegistry, BDIEngine, SkillResult,
 )
 from .alerts import AlertBus, StdoutAlert, FileAlert, DiscordWebhookAlert
-from .paths import sentinel_home
+from .paths import sentinel_home, state_folder, state_folder_note
 
 log = logging.getLogger(__name__)
 
@@ -86,11 +86,14 @@ def run_guardian(
                 )
 
     # Save run results
-    runs = sentinel_home() / "guardian_runs"
+    state, default = state_folder()
+    runs = state / "guardian_runs"
     runs.mkdir(parents=True, exist_ok=True)
     run_file = runs / f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
     run_data = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "state_folder": str(state),
+        "state_folder_default": default,
         "intentions_run": len(intentions),
         "skills_run": len(all_results),
         "findings": sum(len(r.assessments) for r in all_results),
@@ -125,6 +128,7 @@ def main():
 
     if args.status:
         print(bdi.summary())
+        print(f"State folder: {state_folder_note()}")
         return 0
 
     transports = [StdoutAlert()]
@@ -137,6 +141,7 @@ def main():
     results = run_guardian(bdi=bdi, force=args.force, alert_bus=bus)
 
     print("\n" + summary_line(results))
+    print(f"State folder: {state_folder_note()}")
     return 1 if any(not r.success for r in results) else 0
 
 

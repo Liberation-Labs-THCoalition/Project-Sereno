@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import platform
 import re
 import subprocess
@@ -30,6 +29,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+from .paths import skip_list, state_folder, state_folder_note, walk
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,11 @@ class ScanResult:
     findings: list[Finding] = field(default_factory=list)
     checks_run: int = 0
     checks_clean: int = 0
+    # The state folder this scan read (expected.json, skip.json), and whether it was the default because SENTINEL_HOME
+    # wasn't set (2026-10-28: Ember's manual scans read ~/.sentinel for days, SENTINEL_HOME being set only on cron)
+    state_folder: str = ""
+    state_folder_default: bool = False
+    state_folder_note: str = ""   # the same in words, as the header shows it (paths.state_folder_note)
 
     @property
     def critical_count(self) -> int:
@@ -100,8 +106,13 @@ class ScanResult:
             f"Time: {self.scan_time}",
             f"Platform: {self.platform}",
             f"Checks: {self.checks_run} run, {self.checks_clean} clean",
-            "",
         ]
+        if self.state_folder_note:
+            lines.append(f"State folder: {self.state_folder_note}")
+        elif self.state_folder:
+            lines.append(f"State folder: {self.state_folder}"
+                         + (" (the default)" if self.state_folder_default else " (from SENTINEL_HOME)"))
+        lines.append("")
         notes = len(self.findings) - len(self.issues)
         if not self.findings:
             lines.append("No issues found. Your machine looks clean.")
@@ -156,8 +167,8 @@ def _is_wsl() -> bool:
 
 # ── Check: Supply Chain (npm) ──
 
-def check_npm_supply_chain(known_bad: dict | None = None) -> list[Finding]:
-    """Scan node_modules for known-compromised packages."""
+def check_npm_supply_chain(known_bad: dict | None = None, skip=None) -> list[Finding]:
+    """Scan node_modules for known-compromised packages. skip: the folders not to enter (sentinel/paths.py)."""
     findings = []
     if known_bad is None:
         known_bad = load_known_bad_npm()
@@ -166,10 +177,12 @@ def check_npm_supply_chain(known_bad: dict | None = None) -> list[Finding]:
         return findings
 
     home = _home()
+    skip = skip_list(skip)
     node_modules_dirs = []
-    for search_root in [home]:
-        for nm in search_root.rglob("node_modules"):
-            if nm.is_dir() and "node_modules/node_modules" not in str(nm):
+    for dirpath, dirnames, _files in walk(home, skip):
+        if "node_modules" in dirnames:
+            nm = Path(dirpath) / "node_modules"
+            if "node_modules/node_modules" not in str(nm):
                 node_modules_dirs.append(nm)
 
     scopes = set(known_bad.get("scopes", []))
@@ -181,7 +194,8 @@ def check_npm_supply_chain(known_bad: dict | None = None) -> list[Finding]:
             continue
         candidates = []
         for entry in entries:
-            if entry.name.startswith("@") and entry.is_dir():
+            # a scope folder may be a link into a skipped folder: checked before it's asked whether it's a folder
+            if entry.name.startswith("@") and not skip.covers(entry) and entry.is_dir():
                 try:
                     candidates += [(f"{entry.name}/{pkg.name}", pkg, entry.name) for pkg in entry.iterdir()]
                 except OSError:
@@ -190,6 +204,9 @@ def check_npm_supply_chain(known_bad: dict | None = None) -> list[Finding]:
                 candidates.append((entry.name, entry, None))
         for full_name, pkg, scope in candidates:
             if full_name not in listed and scope not in scopes:
+                continue
+            # a linked package (npm link, pnpm), or its package.json, whose files are in a skipped folder
+            if skip.covers(pkg / "package.json"):
                 continue
             version = _npm_version(pkg)
             finding = _npm_verdict(full_name, version, listed.get(full_name), scope in scopes)
@@ -219,20 +236,24 @@ def _npm_version(pkg: Path) -> str:
 
 def _npm_verdict(name: str, version: str, bad_versions, scope_listed: bool):
     """(severity, title, description, remediation) for one installed npm package, or None. How sure the feed is decides
-    the severity (2026-10-23): an exact bad version is critical; a package listed without versions is high; a package
-    that's only under a listed scope is medium, because scopes are broad and most of their packages are fine (every
-    @tanstack package used to be called critical)."""
+    the severity (2026-10-23): an exact bad version is critical; a package listed without versions is medium, asking
+    you to check the version, since the list can't say yours is bad (2026-10-28: a version-less entry read as a
+    version-specific high); a package that's only under a listed scope is medium, because scopes are broad and most of
+    their packages are fine (every @tanstack package used to be called critical)."""
     if bad_versions is not None and version in bad_versions:
         return ("critical", f"Compromised package: {name}@{version}",
                 f"The package {name} version {version} was found in {{where}}. This version is on the "
                 f"known-compromised list. It may contain malware that steals credentials and spreads to other projects.",
                 NPM_COMPROMISED_STEPS)
     if bad_versions is not None and not any(bad_versions):
-        return ("high", f"Package with compromised releases: {name}@{version}",
-                f"{name} is on Sereno's list without specific versions, found in {{where}}. Check {version} against "
-                f"the package's security advisory (osv.dev lists them).",
+        installed = (f"Sereno couldn't read the version installed in {{where}}" if version == "unknown"
+                     else f"The version installed in {{where}} is {version}")
+        return ("medium", f"Check the version: {name}@{version} (the list doesn't say which releases are bad)",
+                f"{name} had compromised releases, but Sereno's list doesn't say which versions, so it can't tell "
+                f"whether yours is one of them. {installed}: compare it with the package's security advisory "
+                f"(osv.dev lists them).",
                 "If your version is a bad one, follow the steps for a compromised package: disconnect, revoke tokens "
-                "from another device, reinstall from a clean lockfile, rotate credentials.")
+                "from another device, reinstall from a clean lockfile, rotate credentials. If it isn't, nothing to do.")
     if bad_versions and version == "unknown":
         return ("medium", f"Listed package with an unreadable version: {name}",
                 f"{name} has known-compromised versions and is in {{where}}, but Sereno couldn't read its "
@@ -292,15 +313,19 @@ def check_pip_supply_chain(known_bad: dict | None = None) -> list[Finding]:
                 details={"package": name, "version": version},
             ))
         else:
+            # A version-less entry can't say this version is bad: medium, asking you to check (2026-10-28: it was a
+            # high that read as "this version is compromised")
             findings.append(Finding(
                 check="supply_chain_pip",
-                severity="high",
-                title=f"Package with compromised releases: {name}=={version}",
+                severity="medium",
+                title=f"Check the version: {name}=={version} (the list doesn't say which releases are bad)",
                 description=(
-                    f"{name} had compromised releases, and Sereno's list doesn't say which versions. "
-                    f"Check {version} against the package's security advisory."
+                    f"{name} had compromised releases, but Sereno's list doesn't say which versions, so it can't tell "
+                    f"whether yours is one of them. The version installed is {version}: compare it with the "
+                    f"package's security advisory."
                 ),
-                remediation=f"Look up {name}'s advisory (osv.dev lists them) and upgrade past any bad version.",
+                remediation=(f"Look up {name}'s advisory (osv.dev lists them). If {version} is named there, uninstall "
+                             f"it and treat that environment's secrets as exposed; if not, nothing to do."),
                 details={"package": name, "version": version, "versions_listed": False},
             ))
 
@@ -309,10 +334,11 @@ def check_pip_supply_chain(known_bad: dict | None = None) -> list[Finding]:
 
 # ── Check: Persistence Mechanisms ──
 
-def check_persistence() -> list[Finding]:
-    """Check for known malware persistence mechanisms."""
+def check_persistence(skip=None) -> list[Finding]:
+    """Check for known malware persistence mechanisms. skip: the folders not to enter (sentinel/paths.py)."""
     findings = []
     home = _home()
+    skip = skip_list(skip)
 
     # gh-token-monitor (Shai-Hulud specific)
     persistence_paths = [
@@ -333,7 +359,7 @@ def check_persistence() -> list[Finding]:
         )
 
     for path, severity, label in persistence_paths:
-        if path.exists():
+        if not skip.covers(path) and path.exists():
             findings.append(Finding(
                 check="persistence",
                 severity=severity,
@@ -356,8 +382,9 @@ def check_persistence() -> list[Finding]:
     # distinctive payload in the same folder, or content that names one. Otherwise they're info (2026-10-23: a plain
     # setup.mjs or a homemade sysmon.py was called critical malware).
     sysmon_safe_parents = {"coverage", "sysmon", "psutil", "watchdog"}
+    payloads, vscode_tasks = _persistence_files(home, skip)
     for name in PAYLOAD_DISTINCTIVE:
-        for found in home.rglob(name):
+        for found in payloads[name]:
             if "node_modules" in str(found):
                 continue
             findings.append(Finding(
@@ -369,7 +396,7 @@ def check_persistence() -> list[Finding]:
                 details={"path": str(found)},
             ))
     for name in PAYLOAD_GENERIC:
-        for found in home.rglob(name):
+        for found in payloads[name]:
             # The skips main had, per name: setup.mjs outside node_modules, sysmon.py outside site-packages and
             # known tools' folders
             if name == "setup.mjs" and "node_modules" in str(found):
@@ -377,7 +404,7 @@ def check_persistence() -> list[Finding]:
             if name == "sysmon.py" and ("site-packages" in str(found)
                                         or any(safe in str(found.parent) for safe in sysmon_safe_parents)):
                 continue
-            if _payload_corroborated(found):
+            if _payload_corroborated(found, skip):
                 findings.append(Finding(
                     check="persistence",
                     severity="critical",
@@ -403,10 +430,10 @@ def check_persistence() -> list[Finding]:
     def make(severity, title, description, remediation, details):
         return Finding(check="persistence", severity=severity, title=title, description=description,
                        remediation=remediation, details=details)
-    findings.extend(check_claude_settings(make, home))
+    findings.extend(check_claude_settings(make, home, skip))
 
     # VS Code task injection
-    for tasks_json in home.rglob(".vscode/tasks.json"):
+    for tasks_json in vscode_tasks:
         try:
             content = tasks_json.read_text()
             if any(sus in content.lower() for sus in [
@@ -426,7 +453,7 @@ def check_persistence() -> list[Finding]:
     # Python startup hooks: a .pth line starting with "import" runs at every interpreter start, and so does a
     # sitecustomize.py or usercustomize.py. litellm 1.107.0's malware (2026-10-21) used a .pth whose only line was
     # `import cook`, which the old exec()/eval() keyword check couldn't see.
-    pths, customizes = _startup_files(home)
+    pths, customizes = _startup_files(home, skip)
     for pth in pths:
         try:
             content = pth.read_text(errors="replace")
@@ -476,12 +503,29 @@ _PTH_RISKY = re.compile(r"exec\(|eval\(|compile\(|base64|b64decode|zlib|marshal|
                         r"urllib|socket|http\.client|__import__")
 
 
-def _startup_files(home: Path):
+def _persistence_files(home: Path, skip):
+    """({payload name: paths named so}, VS Code tasks.json paths) under home, in one walk (it was six rglob walks, one
+    per name). As rglob did, folders and files both count for a payload name, and node_modules and .git are searched;
+    links aren't followed, and the skip list's folders aren't entered."""
+    names = PAYLOAD_DISTINCTIVE + PAYLOAD_GENERIC
+    payloads, tasks = {n: [] for n in names}, []
+    for dirpath, dirnames, filenames in walk(home, skip):
+        for entry in dirnames + filenames:
+            if entry in payloads:
+                payloads[entry].append(Path(dirpath) / entry)
+        if ".vscode" in dirnames:
+            candidate = Path(dirpath) / ".vscode" / "tasks.json"
+            if not skip.covers(candidate) and candidate.is_file():   # tasks.json may link into a skipped folder
+                tasks.append(candidate)
+    return payloads, tasks
+
+
+def _startup_files(home: Path, skip=None):
     """(.pth files, sitecustomize/usercustomize files) inside site-packages or dist-packages under home, found in ONE
     walk (one walk per pattern would multiply the time on a Pi). Links aren't followed; node_modules and .git are
-    skipped."""
+    skipped, and so are the skip list's folders."""
     pths, customizes = [], []
-    for dirpath, dirnames, filenames in os.walk(str(home), followlinks=False):
+    for dirpath, dirnames, filenames in walk(home, skip):
         dirnames[:] = [d for d in dirnames if d not in ("node_modules", ".git")]
         if "site-packages" not in dirpath and "dist-packages" not in dirpath:
             continue
@@ -510,10 +554,11 @@ PAYLOAD_DISTINCTIVE = ("router_runtime.js", "router_init.js", "tanstack_runner.j
 PAYLOAD_GENERIC = ("setup.mjs", "sysmon.py")
 
 
-def _payload_corroborated(path: Path) -> bool:
+def _payload_corroborated(path: Path, skip=None) -> bool:
     """A generic payload name counts as the worm's when a distinctive payload sits in the same folder, or the file
-    names one (or the worm's token monitor)."""
-    if any((path.parent / n).exists() for n in PAYLOAD_DISTINCTIVE):
+    names one (or the worm's token monitor). A neighbour that links into a skipped folder isn't looked at."""
+    skip = skip_list(skip)
+    if any(not skip.covers(path.parent / n) and (path.parent / n).exists() for n in PAYLOAD_DISTINCTIVE):
         return True
     try:
         text = path.read_text(errors="replace")[:200_000]
@@ -599,14 +644,15 @@ def check_network() -> list[Finding]:
 
 # ── Check: Credential Exposure ──
 
-def check_credentials() -> list[Finding]:
-    """Check for exposed credentials in common locations."""
+def check_credentials(skip=None) -> list[Finding]:
+    """Check for exposed credentials in common locations. skip: the folders not to enter (sentinel/paths.py)."""
     findings = []
     home = _home()
+    skip = skip_list(skip)
 
     # .npmrc with tokens
     npmrc = home / ".npmrc"
-    if npmrc.exists():
+    if not skip.covers(npmrc) and npmrc.exists():
         try:
             content = npmrc.read_text()
             if "authToken" in content or "_auth" in content:
@@ -622,7 +668,8 @@ def check_credentials() -> list[Finding]:
             pass
 
     # .env files with secrets
-    for env_file in home.rglob(".env"):
+    env_files = [Path(d) / ".env" for d, _dirs, files in walk(home, skip) if ".env" in files]
+    for env_file in env_files:
         if "node_modules" in str(env_file) or ".git" in str(env_file):
             continue
         try:
@@ -653,17 +700,15 @@ def check_credentials() -> list[Finding]:
 
 # ── Check: Git Repository Safety ──
 
-def check_git_repos() -> list[Finding]:
-    """Check local git repos for signs of compromise."""
+def check_git_repos(skip=None) -> list[Finding]:
+    """Check local git repos for signs of compromise. skip: the folders not to enter (sentinel/paths.py)."""
     findings = []
     home = _home()
 
     dune_patterns = re.compile(r"shai.?hulud|arrakis|spice|sandworm|fremen|muad.?dib", re.I)
 
-    for git_dir in home.rglob(".git"):
-        if not git_dir.is_dir():
-            continue
-        repo = git_dir.parent
+    repos = [Path(d) for d, dirs, _files in walk(home, skip) if ".git" in dirs]
+    for repo in repos:
         branches, rc = _run(["git", "-C", str(repo), "branch", "-a"])
         if rc == 0 and dune_patterns.search(branches):
             findings.append(Finding(
@@ -704,37 +749,41 @@ def load_known_bad_pip() -> dict:
 
 # ── Check: MCP servers (sentinel/mcp.py) ──
 
-def check_mcp() -> list[Finding]:
+def check_mcp(skip=None) -> list[Finding]:
     """MCP servers launched with no fixed version, and MCP configs holding secrets in plain text."""
     from .mcp import check_mcp_servers
 
     def make(severity, title, description, remediation, details):
         return Finding(check="mcp_servers", severity=severity, title=title, description=description,
                        remediation=remediation, details=details)
-    return check_mcp_servers(make, _home(), load_known_bad_npm(), load_known_bad_pip())
+    return check_mcp_servers(make, _home(), load_known_bad_npm(), load_known_bad_pip(), skip)
 
 
 # ── Check: AI agent safety (sentinel/agent_safety.py) ──
 
-def check_agents() -> list[Finding]:
+def check_agents(skip=None) -> list[Finding]:
     """AI coding agents set to skip their own safety prompts, and agent logins left exposed."""
     from .agent_safety import check_agent_safety
 
     def make(severity, title, description, remediation, details):
         return Finding(check="agent_safety", severity=severity, title=title, description=description,
                        remediation=remediation, details=details)
-    return check_agent_safety(make, _home())
+    return check_agent_safety(make, _home(), skip=skip)
 
 
 # ── Main Scanner ──
 
 CHECK_NAMES = ("npm_supply_chain", "pip_supply_chain", "persistence", "processes", "network", "credentials",
                "git_repos", "mcp_servers", "agent_safety")
+# The checks that search folders under home, and so take the scan's skip list
+WALKING_CHECKS = ("npm_supply_chain", "persistence", "credentials", "git_repos", "mcp_servers", "agent_safety")
 
 class SentinelScanner:
-    """The main scanner orchestrator."""
+    """The main scanner orchestrator. skip: paths added to the user's skip list for this scanner's scans (--skip),
+    which each scan reads afresh from the state folder (sentinel/paths.py)."""
 
-    def __init__(self, checks: list[str] | None = None) -> None:
+    def __init__(self, checks: list[str] | None = None, skip=()) -> None:
+        self._skip = list(skip or ())
         self._checks = checks or list(CHECK_NAMES)
         unknown = [c for c in self._checks if c not in CHECK_NAMES]
         if unknown:
@@ -747,12 +796,17 @@ class SentinelScanner:
         hostname = platform.node()
         plat = f"{platform.system()} {platform.release()}"
 
+        state, default = state_folder()
         result = ScanResult(
             hostname=hostname,
             platform=plat,
             scan_time=datetime.now(timezone.utc).isoformat(),
             duration_ms=0,
+            state_folder=str(state),
+            state_folder_default=default,
+            state_folder_note=state_folder_note(),
         )
+        skip = skip_list(self._skip)
 
         check_map = {
             "npm_supply_chain": check_npm_supply_chain,
@@ -770,7 +824,7 @@ class SentinelScanner:
             fn = check_map[check_name]
             try:
                 result.checks_run += 1
-                findings = fn()
+                findings = fn(skip=skip) if check_name in WALKING_CHECKS else fn()
                 if findings:
                     result.findings.extend(findings)
                 else:
@@ -788,6 +842,11 @@ class SentinelScanner:
                     remediation="Run it again; if it keeps failing, report it with this message.",
                     details={"error": f"{type(e).__name__}: {e}"},
                 ))
+
+        # One note per scan for what the skip list kept Sereno out of, so a skip is never silent
+        for severity, title, description, remediation, details in skip.notes():
+            result.findings.append(Finding(check="skip_list", severity=severity, title=title, description=description,
+                                           remediation=remediation, details=details))
 
         result.duration_ms = (time.time() - t0) * 1000
         return result

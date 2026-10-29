@@ -155,6 +155,10 @@ def _check_baseline(**kwargs) -> SkillResult:
                                       else "medium",
                                       title=f"File {c.change_type}: {c.path}", details=c.path, grounded_in=["baseline"])
                            for c in baseline.check()]
+            # what the skip list kept the check out of, so a skip is never silent (sentinel/paths.py)
+            skip = getattr(baseline, "last_skip", None)
+            assessments += [Assessment(severity=severity, title=title, details=description, grounded_in=["skip_list"])
+                            for severity, title, description, _r, _d in (skip.notes() if skip is not None else [])]
         obs = Observation(source="baseline_check", data={"assessments": len(assessments)})
         return SkillResult(skill="check_baseline", success=True, observations=[obs], assessments=assessments)
     except Exception as e:
@@ -175,7 +179,8 @@ def _get_hardening(bdi=None, **kwargs) -> SkillResult:
     """Hardening recommendations, as assessments only when the set of titles changed since the last run."""
     from advisor.hardening import HardeningAdvisor
     try:
-        recs = HardeningAdvisor().assess()
+        advisor = HardeningAdvisor()
+        recs = advisor.assess()
         titles = sorted(r.title for r in recs)
         last = bdi.get_belief("last_hardening") if bdi is not None else None
         changed = last != titles
@@ -183,7 +188,8 @@ def _get_hardening(bdi=None, **kwargs) -> SkillResult:
             bdi.believe("last_hardening", titles, source="get_hardening")
         assessments = [Assessment(severity=HARDENING_SEVERITY.get(r.severity, "high"), title=r.title, details=r.what,
                                   grounded_in=["hardening"]) for r in recs] if changed else []
-        obs = Observation(source="hardening", data={"recommendations": len(recs), "changed": changed})
+        obs = Observation(source="hardening", data={"recommendations": len(recs), "changed": changed,
+                                                    "not_checked": advisor.notes()})   # the skip list's notes
         return SkillResult(skill="get_hardening", success=True, observations=[obs], assessments=assessments)
     except Exception as e:
         return SkillResult(skill="get_hardening", success=False, raw=str(e))

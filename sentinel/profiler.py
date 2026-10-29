@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .paths import sentinel_home
+from .paths import sentinel_home, skip_list, walk
 
 
 @dataclass
@@ -63,6 +63,9 @@ class SystemProfile:
     claude_hooks: list[str] = field(default_factory=list)
     vscode_present: bool = False
 
+    # What the skip list kept the counts out of (sentinel/paths.py): its notes' titles, so a partial count says so
+    not_counted: list[str] = field(default_factory=list)
+
     def summary(self) -> str:
         lines = [
             f"System: {self.hostname} ({self.platform} {self.architecture})",
@@ -73,22 +76,24 @@ class SystemProfile:
             f"Network: {len(self.listening_ports)} listening ports, {self.ssh_keys} SSH keys",
             f"AI: Ollama {'yes' if self.ollama_present else 'no'} ({len(self.ollama_models)} models), Claude Code {'yes' if self.claude_code_installed else 'no'}",
         ]
+        lines += self.not_counted   # "Not checked: 2 folders on your skip list": the counts above leave them out
         return "\n".join(lines)
 
 
-def _run(cmd: list[str], timeout: int = 10) -> tuple[str, int]:
+def _run(cmd: list[str], timeout: int = 10, env=None) -> tuple[str, int]:
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
         return r.stdout.strip(), r.returncode
     except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
         return "", -1
 
 
-def profile_system() -> SystemProfile:
-    """Take a complete system profile snapshot."""
+def profile_system(skip=None) -> SystemProfile:
+    """Take a complete system profile snapshot. skip: the folders not to enter (None: the user's skip list)."""
     import shutil
 
     home = Path.home()
+    skip = skip_list(skip)
     p = SystemProfile(
         hostname=platform.node(),
         platform=platform.system(),
@@ -127,7 +132,9 @@ def profile_system() -> SystemProfile:
     if rc == 0:
         p.node_version = node_out.lstrip("v")
 
-    npm_out, rc = _run(["npm", "--version"])
+    # npm reads ~/.npmrc itself; when that's on the skip list or linked into it, point npm at an empty user config
+    npm_env = dict(os.environ, npm_config_userconfig=os.devnull) if skip.covers(home / ".npmrc") else None
+    npm_out, rc = _run(["npm", "--version"], env=npm_env)
     if rc == 0:
         p.npm_version = npm_out
 
@@ -152,29 +159,31 @@ def profile_system() -> SystemProfile:
     if rc == 0:
         p.pip_packages = max(0, len(pip_out.splitlines()) - 2)
 
-    npm_global, rc = _run(["npm", "list", "-g", "--depth=0"])
+    npm_global, rc = _run(["npm", "list", "-g", "--depth=0"], env=npm_env)
     if rc == 0:
         p.npm_global_packages = max(0, len(npm_global.splitlines()) - 1)
 
     nm_count = 0
-    for nm in home.rglob("node_modules"):
-        if nm.is_dir() and "node_modules/node_modules" not in str(nm):
+    for dirpath, dirnames, _files in walk(home, skip):
+        if "node_modules" in dirnames and "node_modules/node_modules" not in os.path.join(dirpath, "node_modules"):
             nm_count += 1
         if nm_count > 50:
             break
     p.node_modules_dirs = nm_count
 
-    # SSH keys
+    # SSH keys (names only; nothing on the skip list, or linked into it, is looked at)
     ssh_dir = home / ".ssh"
-    if ssh_dir.exists():
+    if not skip.covers(ssh_dir) and ssh_dir.exists():
         p.ssh_keys = sum(1 for f in ssh_dir.iterdir()
-                         if f.is_file() and f.suffix != ".pub" and f.name not in ("known_hosts", "config", "authorized_keys"))
+                         if f.suffix != ".pub" and f.name not in ("known_hosts", "config", "authorized_keys")
+                         and not skip.covers(f) and f.is_file())
 
-    p.has_npmrc = (home / ".npmrc").exists()
+    p.has_npmrc = not skip.covers(home / ".npmrc") and (home / ".npmrc").exists()
 
     env_count = 0
-    for env in home.rglob(".env"):
-        if "node_modules" not in str(env) and ".git" not in str(env):
+    for dirpath, dirnames, filenames in walk(home, skip):
+        # a folder named .env (a virtual environment) counted too, as rglob counted it
+        if (".env" in filenames or ".env" in dirnames) and "node_modules" not in dirpath and ".git" not in dirpath:
             env_count += 1
         if env_count > 20:
             break
@@ -185,7 +194,7 @@ def profile_system() -> SystemProfile:
     p.claude_code_installed = claude_bin is not None
 
     claude_settings = home / ".claude" / "settings.json"
-    if claude_settings.exists():
+    if not skip.covers(claude_settings) and claude_settings.exists():
         try:
             data = json.loads(claude_settings.read_text())
             hooks = data.get("hooks", {})
@@ -194,6 +203,8 @@ def profile_system() -> SystemProfile:
             pass
 
     p.vscode_present = shutil.which("code") is not None
+    # what the skip list kept out of the counts (an entry that matched nothing changed no count)
+    p.not_counted = [title for _sev, title, _d, _r, details in skip.notes() if "entries" not in details]
 
     return p
 
