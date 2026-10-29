@@ -105,7 +105,7 @@ def cmd_scan(args) -> int:
 
 def cmd_harden(args) -> int:
     from advisor.hardening import HardeningAdvisor
-    advisor = HardeningAdvisor()
+    advisor = HardeningAdvisor(**_skip_kw(args))
     print(advisor.report())
     return 0
 
@@ -201,7 +201,7 @@ def cmd_all(args) -> int:
     print(f"\n{'—' * 50}")
     print("\n[3/4] Hardening Recommendations\n")
     from advisor.hardening import HardeningAdvisor
-    advisor = HardeningAdvisor()
+    advisor = HardeningAdvisor(**kw)
     print(advisor.report())
 
     print(f"\n{'—' * 50}")
@@ -263,7 +263,7 @@ def main() -> None:
     scan_p.add_argument("--cron", action="store_true")
 
     # harden
-    sub.add_parser("harden", help="Hardening recommendations")
+    sub.add_parser("harden", help="Hardening recommendations", parents=[skip_p])
 
     # profile
     sub.add_parser("profile", help="System profile", parents=[skip_p])

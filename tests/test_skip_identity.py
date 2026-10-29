@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from advisor import hardening
 from sentinel import agent_safety, baseline, claude_settings, mcp, paths, profiler, scanner
 from sentinel.paths import SkipList, state_folder_note, walk
 from sentinel.scanner import Finding, SentinelScanner
@@ -576,6 +577,30 @@ def _run_baseline_ssh(home, skip):
     return baseline._scan_path(home / ".ssh", skip=skip)
 
 
+def _run_advisor_ssh(home, skip):
+    return [r.title for r in hardening.check_ssh_config(skip)]
+
+
+def _run_advisor_files(home, skip):
+    return [r.title for r in hardening.check_sensitive_files(skip)]
+
+
+def _plant_authorized_keys(home, other):
+    f = write(other / "ak", "ssh-ed25519 AAAA x")
+    f.chmod(0o666)   # loose, so the control has something to report
+    _link(home / ".ssh" / "authorized_keys", f)
+
+
+def _loose(plant):
+    """plant, with every file it made in the folder readable by all, so the advisor's control reports it."""
+    def loose(home, other):
+        plant(home, other)
+        for f in other.rglob("*"):
+            if f.is_file():
+                f.chmod(0o644)
+    return loose
+
+
 PROBES = {
     "a project's .claude linked into the folder": (_plant_dot_claude, _run_claude_walk),
     "a project's .cursor linked into the folder": (_plant_dot_cursor, _run_mcp_walk),
@@ -623,6 +648,12 @@ PROBES = {
                              write(other / "s.json", {"hooks": {"Stop": []}}),
                              _link(home / ".claude" / "settings.json", other / "s.json")), _run_profile),
     "~/.ssh (baseline)": (_plant_user_dir(".ssh", "config", "Host x"), _run_baseline_ssh),
+    # The hardening advisor (round 2's verifier: it took no skip list, and named a key file inside the folder)
+    "a key in ~/.ssh (advisor)": (_loose(_plant_user_file(".ssh/id_leak", "k")), _run_advisor_ssh),
+    "~/.ssh (advisor)": (_loose(_plant_user_dir(".ssh", "id_leak", "k")), _run_advisor_ssh),
+    "~/.ssh/authorized_keys (advisor)": (_plant_authorized_keys, _run_advisor_ssh),
+    "~/.npmrc (advisor)": (_loose(_plant_user_file(".npmrc", "x")), _run_advisor_files),
+    "~/.docker/config.json (advisor)": (_loose(_plant_user_dir(".docker", "config.json", "{}")), _run_advisor_files),
 }
 
 
@@ -632,7 +663,7 @@ def test_nothing_inside_a_skipped_folder_is_looked_up(probe, home, touched, monk
     folder is never followed, not even to ask whether it's a file. The control shows the same code looks there, and
     finds something, when nothing is skipped."""
     import shutil
-    monkeypatch.setattr(profiler, "_run", lambda cmd, timeout=10: ("", 1))
+    monkeypatch.setattr(profiler, "_run", lambda cmd, timeout=10, env=None: ("", 1))
     monkeypatch.setattr(shutil, "which", lambda name: None)
     other = home / "agents" / "other"
     plant, run = PROBES[probe]
@@ -763,3 +794,134 @@ def test_an_empty_sentinel_home_is_said_to_be_empty(home, monkeypatch):
     assert result.state_folder_note == expected
     monkeypatch.delenv("SENTINEL_HOME")
     assert state_folder_note() == "%s (the default: SENTINEL_HOME isn't set)" % (home / ".sentinel")
+
+
+
+# ── The hardening advisor, the guardian's skill and npm (round 2's verifier) ──
+
+def _advisor_case(home, monkeypatch):
+    """~/.ssh is a link into the other agent's folder, holding a key anyone can read; the advisor's commands are
+    stubbed, so only its file checks run on this machine's state."""
+    monkeypatch.setattr(hardening, "_run", lambda cmd, timeout=15: ("", 1))
+    other = home / "agents" / "other"
+    write(other / "ssh" / "id_leak", "k").chmod(0o644)
+    (home / ".ssh").symlink_to(other / "ssh")
+    return other
+
+
+def _home_checks_only(monkeypatch):
+    monkeypatch.setattr(hardening.HardeningAdvisor, "ALL_CHECKS",
+                        [hardening.check_ssh_config, hardening.check_sensitive_files])
+
+
+def test_the_advisor_takes_the_skip_list_and_says_what_it_skipped(home, monkeypatch, touched):
+    """HardeningAdvisor passes its skip list to the checks that read files under home, and its report carries the
+    note. Given as a list of paths, as --skip is; and None reads skip.json."""
+    other = _advisor_case(home, monkeypatch)
+    _home_checks_only(monkeypatch)
+    assert any("id_leak" in r.title for r in hardening.HardeningAdvisor(skip=SkipList()).assess())   # control
+    for advisor in (hardening.HardeningAdvisor(skip=[str(other)]), hardening.HardeningAdvisor(skip=SkipList([str(other)]))):
+        with touched.recording():
+            report = advisor.report()
+        assert "id_leak" not in report
+        assert touched.inside(other) == []
+        assert "Not checked: 1 folder on your skip list. Sereno didn't enter 1 folder" in report
+        assert report.startswith("No recommendations for what was checked.")
+    _skip_file(["~/agents/other"])
+    advisor = hardening.HardeningAdvisor()
+    assert [r.title for r in advisor.assess() if "id_leak" in r.title] == []
+    assert [n.split(".")[0] for n in advisor.notes()] == ["Not checked: 1 folder on your skip list"]
+
+
+def test_the_advisor_report_with_recommendations_still_carries_the_note(home, monkeypatch):
+    other = _advisor_case(home, monkeypatch)
+    _home_checks_only(monkeypatch)
+    write(home / ".netrc", "machine x").chmod(0o644)   # yours, and loose: reported
+    report = hardening.HardeningAdvisor(skip=[str(other)]).report()
+    assert "Network credentials has loose permissions" in report and "id_leak" not in report
+    assert report.rstrip().splitlines()[-1].startswith("Not checked: 1 folder on your skip list.")
+
+
+def test_a_check_that_fails_is_logged_and_the_others_still_run(home, monkeypatch, caplog):
+    """assess() logged through a logger the module never defined, so one failing check raised NameError and took the
+    whole report with it."""
+    other = _advisor_case(home, monkeypatch)
+
+    def boom():
+        raise RuntimeError("broken")
+    monkeypatch.setattr(hardening.HardeningAdvisor, "ALL_CHECKS", [boom, hardening.check_ssh_config])
+    with caplog.at_level("WARNING", logger="advisor.hardening"):
+        try:
+            recs = hardening.HardeningAdvisor(skip=SkipList()).assess()
+        except NameError as e:
+            raise AssertionError("assess() raised %r instead of logging the failed check" % e)
+    assert any("id_leak" in r.title for r in recs)
+    assert "Hardening check boom failed: broken" in caplog.text
+
+
+def test_harden_and_all_pass_skip_to_the_advisor(home, monkeypatch, capsys):
+    """--skip reaches the advisor from the command line, through harden and through step 3 of all."""
+    import sys
+    import types
+    from sentinel import __main__ as cli
+    seen = []
+
+    class Recording(hardening.HardeningAdvisor):
+        ALL_CHECKS = []
+
+        def __init__(self, skip=None):
+            seen.append(skip)
+            super().__init__(skip)
+    monkeypatch.setattr(hardening, "HardeningAdvisor", Recording)
+    monkeypatch.setattr(sys, "argv", ["sentinel", "harden", "--skip", "~/agents/other"])
+    with pytest.raises(SystemExit):
+        cli.main()
+    assert seen == [["~/agents/other"]]
+    assert "Not checked" not in capsys.readouterr().out   # nothing looked into the folder, so nothing to note
+
+    seen.clear()
+    monkeypatch.setattr(cli, "profile_system", lambda skip=None: types.SimpleNamespace(summary=lambda: "profile"))
+    monkeypatch.setattr(cli, "save_profile", lambda p: None)
+    monkeypatch.setattr(SentinelScanner, "scan", lambda self: scanner.ScanResult(
+        hostname="h", platform="p", scan_time="t", duration_ms=0.0))
+    monkeypatch.setattr(cli.FileBaseline, "load", classmethod(
+        lambda cls: types.SimpleNamespace(file_count=2, check=lambda skip=None: [])))
+    monkeypatch.setattr(sys, "argv", ["sentinel", "all", "--skip", "~/agents/other"])
+    with pytest.raises(SystemExit):
+        cli.main()
+    assert seen == [["~/agents/other"]]
+
+
+def test_the_guardian_skill_skips_and_reports_the_note(home, monkeypatch):
+    from sentinel import skills
+    other = _advisor_case(home, monkeypatch)
+    _home_checks_only(monkeypatch)
+    _skip_file(["~/agents/other"])
+    result = skills._get_hardening(bdi=None)
+    assert result.success
+    assert [a.title for a in result.assessments if "id_leak" in a.title] == []
+    notes = result.observations[0].data["not_checked"]
+    assert [n.split(".")[0] for n in notes] == ["Not checked: 1 folder on your skip list"]
+    paths.sentinel_home().joinpath("skip.json").unlink()
+    control = skills._get_hardening(bdi=None)
+    assert any("id_leak" in a.title for a in control.assessments)
+    assert control.observations[0].data["not_checked"] == []
+
+
+def test_npm_is_pointed_away_from_an_npmrc_on_the_skip_list(home, monkeypatch):
+    """profile runs npm, and npm reads ~/.npmrc itself: when that file is linked into a skipped folder, npm gets an
+    empty user config instead."""
+    import shutil
+    calls = []
+    monkeypatch.setattr(profiler, "_run", lambda cmd, timeout=10, env=None: (calls.append((cmd[0], env)), ("", 1))[1])
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    other = home / "agents" / "other"
+    write(other / "npmrc", "//registry.npmjs.org/:_authToken=npm_x\n")
+    (home / ".npmrc").symlink_to(other / "npmrc")
+    profiler.profile_system(skip=SkipList([str(other)]))
+    npm = [env for exe, env in calls if exe == "npm"]
+    assert len(npm) == 2 and all(env is not None and env["npm_config_userconfig"] == os.devnull for env in npm)
+    assert all(env is None for exe, env in calls if exe != "npm")
+    calls.clear()
+    profiler.profile_system(skip=SkipList())
+    assert [env for exe, env in calls if exe == "npm"] == [None, None]   # control: npm's own config when nothing is skipped

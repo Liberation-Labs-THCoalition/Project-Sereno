@@ -80,9 +80,9 @@ class SystemProfile:
         return "\n".join(lines)
 
 
-def _run(cmd: list[str], timeout: int = 10) -> tuple[str, int]:
+def _run(cmd: list[str], timeout: int = 10, env=None) -> tuple[str, int]:
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
         return r.stdout.strip(), r.returncode
     except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
         return "", -1
@@ -132,7 +132,9 @@ def profile_system(skip=None) -> SystemProfile:
     if rc == 0:
         p.node_version = node_out.lstrip("v")
 
-    npm_out, rc = _run(["npm", "--version"])
+    # npm reads ~/.npmrc itself; when that's on the skip list or linked into it, point npm at an empty user config
+    npm_env = dict(os.environ, npm_config_userconfig=os.devnull) if skip.covers(home / ".npmrc") else None
+    npm_out, rc = _run(["npm", "--version"], env=npm_env)
     if rc == 0:
         p.npm_version = npm_out
 
@@ -157,7 +159,7 @@ def profile_system(skip=None) -> SystemProfile:
     if rc == 0:
         p.pip_packages = max(0, len(pip_out.splitlines()) - 2)
 
-    npm_global, rc = _run(["npm", "list", "-g", "--depth=0"])
+    npm_global, rc = _run(["npm", "list", "-g", "--depth=0"], env=npm_env)
     if rc == 0:
         p.npm_global_packages = max(0, len(npm_global.splitlines()) - 1)
 

@@ -146,7 +146,7 @@ def _plant_watched(other):
 
 def _quiet_profiler(monkeypatch):
     import shutil
-    monkeypatch.setattr(profiler, "_run", lambda cmd, timeout=10: ("", 1))
+    monkeypatch.setattr(profiler, "_run", lambda cmd, timeout=10, env=None: ("", 1))
     monkeypatch.setattr(shutil, "which", lambda name: None)
 
 

@@ -12,6 +12,7 @@ comes with:
 """
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import re
@@ -19,6 +20,10 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from sentinel.paths import skip_list
+
+logger = logging.getLogger(__name__)   # assess() logs a check that failed (it was never defined, so a failure raised)
 
 
 @dataclass
@@ -67,20 +72,22 @@ def _is_linux() -> bool:
 
 # ── Checks ──
 
-def check_ssh_config() -> list[Recommendation]:
-    """Check SSH configuration for common issues."""
+def check_ssh_config(skip=None) -> list[Recommendation]:
+    """Check SSH configuration for common issues. skip: the folders not to enter (None: the user's skip list); asked
+    before each path is looked up, so ~/.ssh linked into a skipped folder is never listed (2026-10-29)."""
     recs = []
     home = _home()
+    skip = skip_list(skip)
 
     ssh_dir = home / ".ssh"
-    if not ssh_dir.exists():
+    if skip.covers(ssh_dir) or not ssh_dir.exists():
         return recs
 
     # Check SSH key permissions
     for key_file in ssh_dir.glob("*"):
         if key_file.suffix == ".pub" or key_file.name in ("known_hosts", "config", "authorized_keys"):
             continue
-        if key_file.is_file():
+        if not skip.covers(key_file) and key_file.is_file():
             mode = oct(key_file.stat().st_mode)[-3:]
             if mode != "600":
                 recs.append(Recommendation(
@@ -95,7 +102,7 @@ def check_ssh_config() -> list[Recommendation]:
 
     # Check authorized_keys
     auth_keys = ssh_dir / "authorized_keys"
-    if auth_keys.exists():
+    if not skip.covers(auth_keys) and auth_keys.exists():
         mode = oct(auth_keys.stat().st_mode)[-3:]
         if mode not in ("600", "644"):
             recs.append(Recommendation(
@@ -246,10 +253,12 @@ def check_auto_updates() -> list[Recommendation]:
     return recs
 
 
-def check_sensitive_files() -> list[Recommendation]:
-    """Check for sensitive files with wrong permissions."""
+def check_sensitive_files(skip=None) -> list[Recommendation]:
+    """Check for sensitive files with wrong permissions. skip: as check_ssh_config's; a file on the list, or linked
+    into it, isn't looked up."""
     recs = []
     home = _home()
+    skip = skip_list(skip)
 
     sensitive = [
         (home / ".env", "600", "Environment file with secrets"),
@@ -260,7 +269,7 @@ def check_sensitive_files() -> list[Recommendation]:
     ]
 
     for path, expected_mode, label in sensitive:
-        if path.exists():
+        if not skip.covers(path) and path.exists():
             actual = oct(path.stat().st_mode)[-3:]
             if actual != expected_mode and int(actual, 8) > int(expected_mode, 8):
                 recs.append(Recommendation(
@@ -329,7 +338,8 @@ def check_ollama_exposure() -> list[Recommendation]:
 # ── Main Advisor ──
 
 class HardeningAdvisor:
-    """Run all hardening checks and produce recommendations."""
+    """Run all hardening checks and produce recommendations. skip: the folders not to enter, as for a scan (None: the
+    user's skip list, a list of paths: added to it, as --skip is); what it kept the checks out of is in notes()."""
 
     ALL_CHECKS = [
         check_ssh_config,
@@ -341,20 +351,34 @@ class HardeningAdvisor:
         check_ollama_exposure,
     ]
 
+    # The checks that read files under home, and so take the skip list
+    HOME_CHECKS = (check_ssh_config, check_sensitive_files)
+
+    def __init__(self, skip=None):
+        self.skip = skip_list(skip)
+
     def assess(self) -> list[Recommendation]:
         """Run all checks and return recommendations."""
         recs = []
         for check_fn in self.ALL_CHECKS:
             try:
-                recs.extend(check_fn())
+                recs.extend(check_fn(self.skip) if check_fn in self.HOME_CHECKS else check_fn())
             except Exception as e:
                 logger.warning("Hardening check %s failed: %s", check_fn.__name__, e)
         return recs
 
+    def notes(self) -> list:
+        """What the skip list kept these checks out of, and what's wrong with the list, in its own words
+        (sentinel/paths.py SkipList.notes), so a skip is never silent."""
+        return ["%s. %s" % (title, description) for _severity, title, description, _fix, _details in self.skip.notes()]
+
     def report(self) -> str:
         """Generate a human-readable hardening report."""
         recs = self.assess()
+        notes = self.notes()
         if not recs:
+            if notes:
+                return "\n".join(["No recommendations for what was checked."] + notes)
             return "Your machine looks well-configured. No recommendations at this time."
 
         lines = [
@@ -371,5 +395,9 @@ class HardeningAdvisor:
         easy_count = sum(1 for r in recs if r.difficulty == "easy")
         if easy_count:
             lines.append(f"\n{easy_count} of these are quick fixes you can do right now.")
+
+        if notes:
+            lines.append("")
+            lines.extend(notes)
 
         return "\n".join(lines)

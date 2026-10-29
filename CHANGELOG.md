@@ -12,7 +12,7 @@ From Ember's guardian install on a shared home (2026-10-26..28); Nexus found the
   agent's folder but your own), or pass `--skip PATH`, and every search leaves them out, without entering them: package
   folders, payload files, VS Code tasks, Python startup files, `.env` files, git repositories, Claude Code and MCP
   project settings (also those `~/.claude.json` lists, and the servers it keeps for them), the baseline, the profile's
-  counts, and the files read at fixed places (`~/.bashrc`, `~/.claude.json`, `CLAUDE_CONFIG_DIR`...) when one is
+  counts, the hardening advice (`harden`, `all` and the guardian's), and the files read at fixed places (`~/.bashrc`, `~/.claude.json`, `CLAUDE_CONFIG_DIR`...) when one is
   listed or links into a listed folder. Each path is checked before Sereno's first look at it, so nothing inside a
   listed folder is looked at, and it counts as inside by the path as written (a link in the folder pointing elsewhere
   is still in it), by where it leads (a link into the folder doesn't get around it), or by what the folder is (a listed

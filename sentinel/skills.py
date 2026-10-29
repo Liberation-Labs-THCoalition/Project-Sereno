@@ -179,7 +179,8 @@ def _get_hardening(bdi=None, **kwargs) -> SkillResult:
     """Hardening recommendations, as assessments only when the set of titles changed since the last run."""
     from advisor.hardening import HardeningAdvisor
     try:
-        recs = HardeningAdvisor().assess()
+        advisor = HardeningAdvisor()
+        recs = advisor.assess()
         titles = sorted(r.title for r in recs)
         last = bdi.get_belief("last_hardening") if bdi is not None else None
         changed = last != titles
@@ -187,7 +188,8 @@ def _get_hardening(bdi=None, **kwargs) -> SkillResult:
             bdi.believe("last_hardening", titles, source="get_hardening")
         assessments = [Assessment(severity=HARDENING_SEVERITY.get(r.severity, "high"), title=r.title, details=r.what,
                                   grounded_in=["hardening"]) for r in recs] if changed else []
-        obs = Observation(source="hardening", data={"recommendations": len(recs), "changed": changed})
+        obs = Observation(source="hardening", data={"recommendations": len(recs), "changed": changed,
+                                                    "not_checked": advisor.notes()})   # the skip list's notes
         return SkillResult(skill="get_hardening", success=True, observations=[obs], assessments=assessments)
     except Exception as e:
         return SkillResult(skill="get_hardening", success=False, raw=str(e))
