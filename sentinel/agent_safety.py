@@ -31,6 +31,7 @@ from pathlib import Path
 
 from .claude_settings import known_projects, project_files
 from .mcp import git_ls_file, strip_jsonc
+from .paths import skip_list
 from .redact import redact
 
 # Agent credentials people put in shell files. Claude Code reads the first three (the OAuth token that
@@ -282,15 +283,15 @@ def claude_prompts_off(data, scope: str) -> list:
     return out
 
 
-def _claude_files(home: Path, environ) -> list:
+def _claude_files(home: Path, environ, skip=None) -> list:
     """(path, scope) for every Claude Code settings file to read: yours (in ~/.claude and $CLAUDE_CONFIG_DIR), managed,
-    and the project ones the persistence check finds (sentinel/claude_settings.py)."""
+    and the project ones the persistence check finds (sentinel/claude_settings.py), outside the skip list's folders."""
     files = []
     for d in _config_dirs(home / ".claude", environ.get("CLAUDE_CONFIG_DIR")):
         files += [(d / "settings.json", "user"), (d / "settings.local.json", "user")]
     files += [(p, "managed") for p in MANAGED_FILES]
     files += [(p, "project" if p.name == "settings.json" else "local")
-              for p, _ in project_files(home, known_projects(home))]
+              for p, _ in project_files(home, known_projects(home), skip)]
     return files
 
 
@@ -367,9 +368,9 @@ def _claude_finding(finding, path: Path, scope: str, items: list):
                    % (path, root, keep, undo), details)
 
 
-def _claude_findings(finding, home: Path, environ) -> list:
+def _claude_findings(finding, home: Path, environ, skip=None) -> list:
     out, seen = [], set()
-    for path, scope in _claude_files(home, environ):
+    for path, scope in _claude_files(home, environ, skip):
         real = os.path.realpath(str(path))
         if real in seen:
             continue
@@ -1043,16 +1044,21 @@ def _flag_finding(finding, path: Path, lineno: int, code: str, flags: list):
         {"path": str(path), "line": lineno, "flags": ["%s %s" % f for f in flags], "name": name})
 
 
-def _shell_files(home: Path) -> list:
+def _shell_files(home: Path, skip=None) -> list:
+    """The shell startup files to read. The folders of them (SHELL_DIRS) are listed only when they're not on the skip
+    list, and a file in one that links into a skipped folder is left out."""
+    skip = skip_list(skip)
     files = [home / f for f in SHELL_FILES]
     for d, pattern in SHELL_DIRS:
-        files += sorted(p for p in (home / d).glob(pattern) if p.is_file())
+        if skip.covers(home / d):
+            continue
+        files += sorted(p for p in (home / d).glob(pattern) if p.is_file() and not skip.covers(p))
     return files
 
 
-def _shell_findings(finding, home: Path) -> list:
+def _shell_findings(finding, home: Path, skip=None) -> list:
     out = []
-    for path in _shell_files(home):
+    for path in _shell_files(home, skip):
         try:
             text = _read(path)
         except OSError as e:
@@ -1138,12 +1144,14 @@ def _environment_findings(finding, environ) -> list:
 
 # ── The check ──
 
-def check_agent_safety(finding, home: Path = None, environ=None) -> list:
+def check_agent_safety(finding, home: Path = None, environ=None, skip=None) -> list:
     """Findings for AI agents set to skip their safety prompts and for agent logins left exposed. `finding(severity,
     title, description, remediation, details)` builds one (the scanner passes it, as for mcp.py). environ defaults to
-    os.environ; it's where CLAUDE_CONFIG_DIR, CODEX_HOME and the credential variables are looked up."""
+    os.environ; it's where CLAUDE_CONFIG_DIR, CODEX_HOME and the credential variables are looked up. skip: the folders
+    not to enter (sentinel/paths.py), which the project-settings walk and the shell-file folders follow."""
     home = home or Path.home()
     environ = os.environ if environ is None else environ
-    return (_claude_findings(finding, home, environ) + _codex_findings(finding, home, environ)
-            + _gemini_findings(finding, home) + _vscode_findings(finding, home) + _shell_findings(finding, home)
+    skip = skip_list(skip)
+    return (_claude_findings(finding, home, environ, skip) + _codex_findings(finding, home, environ)
+            + _gemini_findings(finding, home) + _vscode_findings(finding, home) + _shell_findings(finding, home, skip)
             + _login_file_findings(finding, home, environ) + _environment_findings(finding, environ))

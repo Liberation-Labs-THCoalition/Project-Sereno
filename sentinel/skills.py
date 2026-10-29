@@ -155,6 +155,10 @@ def _check_baseline(**kwargs) -> SkillResult:
                                       else "medium",
                                       title=f"File {c.change_type}: {c.path}", details=c.path, grounded_in=["baseline"])
                            for c in baseline.check()]
+            # what the skip list kept the check out of, so a skip is never silent (sentinel/paths.py)
+            skip = getattr(baseline, "last_skip", None)
+            assessments += [Assessment(severity=severity, title=title, details=description, grounded_in=["skip_list"])
+                            for severity, title, description, _r, _d in (skip.notes() if skip is not None else [])]
         obs = Observation(source="baseline_check", data={"assessments": len(assessments)})
         return SkillResult(skill="check_baseline", success=True, observations=[obs], assessments=assessments)
     except Exception as e:

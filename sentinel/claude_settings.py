@@ -23,6 +23,8 @@ import os
 import re
 from pathlib import Path
 
+from .paths import skip_list, walk
+
 KNOWN_MALWARE = ("router_init", "tanstack_runner", "token-monitor", "gh-token-monitor", "shai-hulud")
 FETCH_AND_RUN = re.compile(
     r"(curl|wget)\b[^|;&]*\|\s*(ba|z|da)?sh\b"          # curl ... | sh
@@ -54,18 +56,22 @@ def known_projects(home: Path) -> list:
         return []
 
 
-def project_files(home: Path, extra_roots=()) -> list:
+def project_files(home: Path, extra_roots=(), skip=None) -> list:
     """(path, "project") for .claude/settings*.json in Claude Code's known projects and up to WALK_DEPTH folders under
-    home. Home itself is the user level, not a project."""
+    home. Home itself is the user level, not a project. Nothing in a folder on the skip list is touched (sentinel/paths.py):
+    the walk doesn't enter one, and a settings file in one (a known project inside it) or linking into one is dropped
+    before it's looked at."""
+    skip = skip_list(skip)
     roots = set(Path(r) for r in extra_roots)
-    for root, dirs, _files in os.walk(str(home)):
+    for root, dirs, _files in walk(home, skip):
         if len(Path(root).relative_to(home).parts) >= WALK_DEPTH:
             dirs[:] = []
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
         if any((Path(root) / f).is_file() for f in PROJECT_FILES):
             roots.add(Path(root))
     roots.discard(home)
-    return [(r / f, "project") for r in sorted(roots) for f in PROJECT_FILES if (r / f).is_file()]
+    return [(r / f, "project") for r in sorted(roots) for f in PROJECT_FILES
+            if not skip.covers(r / f) and (r / f).is_file()]
 
 
 def hook_commands(data) -> list:
@@ -94,11 +100,12 @@ def judge_hook(command: str, scope: str):
     return None, ""
 
 
-def check_claude_settings(finding, home: Path = None) -> list:
-    """Findings for Claude Code settings files; `finding(severity, title, description, remediation, details)`."""
+def check_claude_settings(finding, home: Path = None, skip=None) -> list:
+    """Findings for Claude Code settings files; `finding(severity, title, description, remediation, details)`. skip: the
+    folders not to enter (sentinel/paths.py)."""
     home = home or Path.home()
     out, seen = [], set()
-    for path, scope in user_files(home) + project_files(home, known_projects(home)):
+    for path, scope in user_files(home) + project_files(home, known_projects(home), skip):
         real = os.path.realpath(path)
         if real in seen:
             continue

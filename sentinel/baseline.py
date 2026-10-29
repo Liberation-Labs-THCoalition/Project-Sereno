@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .paths import sentinel_home
+from .paths import sentinel_home, skip_list, walk
 
 logger = logging.getLogger(__name__)
 
@@ -174,16 +174,17 @@ def _file_permissions(path: Path) -> str:
         return "???"
 
 
-def _scan_path(root: Path, max_depth: int = 5) -> list[FileRecord]:
-    """Scan a directory tree and record file states."""
+def _scan_path(root: Path, max_depth: int = 5, skip=None) -> list[FileRecord]:
+    """Scan a directory tree and record file states. Nothing on the skip list is entered or read (sentinel/paths.py)."""
     records = []
     root = root.expanduser().resolve()
+    skip = skip_list(skip)
 
     if not root.exists():
         return records
 
     if root.is_file():
-        if not _should_skip(root):
+        if not _should_skip(root) and not skip.covers(root):
             try:
                 st = root.stat()
                 records.append(FileRecord(
@@ -199,7 +200,7 @@ def _scan_path(root: Path, max_depth: int = 5) -> list[FileRecord]:
                 pass
         return records
 
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in walk(root, skip):
         depth = str(dirpath).count(os.sep) - str(root).count(os.sep)
         if depth >= max_depth:
             dirnames.clear()
@@ -237,9 +238,10 @@ class FileBaseline:
         self._records: dict[str, FileRecord] = {}
         self._created: str = ""
         self._watch_paths: list[str] = []
+        self.last_skip = None   # the skip list the last create() or check() used, for its notes (sentinel/paths.py)
 
-    def create(self, *paths: str) -> int:
-        """Create a baseline from the given paths."""
+    def create(self, *paths: str, skip=None) -> int:
+        """Create a baseline from the given paths. skip: the folders not to enter (None: the user's skip list)."""
         import platform
 
         all_paths = list(paths) if paths else list(DEFAULT_WATCH_PATHS)
@@ -251,23 +253,26 @@ class FileBaseline:
         self._watch_paths = all_paths
         self._records.clear()
         self._created = datetime.now(timezone.utc).isoformat()
+        skip = self.last_skip = skip_list(skip)
 
         for path_str in all_paths:
             path = Path(path_str).expanduser()
-            for record in _scan_path(path):
+            for record in _scan_path(path, skip=skip):
                 self._records[record.path] = record
 
         logger.info("Baseline created: %d files from %d paths", len(self._records), len(all_paths))
         return len(self._records)
 
-    def check(self) -> list[FileChange]:
-        """Compare current state against baseline."""
+    def check(self, skip=None) -> list[FileChange]:
+        """Compare current state against baseline. skip: the folders not to enter (None: the user's skip list); a file
+        in one wasn't looked at, so it's never reported as removed."""
         changes = []
         current_paths: set[str] = set()
+        skip = self.last_skip = skip_list(skip)
 
         for path_str in self._watch_paths:
             path = Path(path_str).expanduser()
-            for record in _scan_path(path):
+            for record in _scan_path(path, skip=skip):
                 current_paths.add(record.path)
                 baseline = self._records.get(record.path)
 
@@ -304,7 +309,9 @@ class FileBaseline:
 
         for path_str, record in self._records.items():
             # A record the skip rules now exclude (a Claude Code transcript in an older baseline) isn't "gone"
-            if path_str not in current_paths and not _should_skip(Path(path_str)):
+            # and one in a folder on the skip list wasn't looked at
+            if (path_str not in current_paths and not _should_skip(Path(path_str))
+                    and not skip.covers(path_str, record=False)):
                 changes.append(FileChange(
                     path=path_str,
                     change_type="removed",
@@ -314,9 +321,9 @@ class FileBaseline:
 
         return changes
 
-    def update(self, changes: list[FileChange] | None = None) -> int:
+    def update(self, changes: list[FileChange] | None = None, skip=None) -> int:
         """Accept current state as the new baseline."""
-        count = self.create(*self._watch_paths)
+        count = self.create(*self._watch_paths, skip=skip)
         return count
 
     def save(self, path: str = "") -> None:

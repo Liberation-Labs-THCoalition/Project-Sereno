@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .paths import sentinel_home
+from .paths import sentinel_home, skip_list, walk
 
 
 @dataclass
@@ -63,6 +63,9 @@ class SystemProfile:
     claude_hooks: list[str] = field(default_factory=list)
     vscode_present: bool = False
 
+    # What the skip list kept the counts out of (sentinel/paths.py): its notes' titles, so a partial count says so
+    not_counted: list[str] = field(default_factory=list)
+
     def summary(self) -> str:
         lines = [
             f"System: {self.hostname} ({self.platform} {self.architecture})",
@@ -73,6 +76,7 @@ class SystemProfile:
             f"Network: {len(self.listening_ports)} listening ports, {self.ssh_keys} SSH keys",
             f"AI: Ollama {'yes' if self.ollama_present else 'no'} ({len(self.ollama_models)} models), Claude Code {'yes' if self.claude_code_installed else 'no'}",
         ]
+        lines += self.not_counted   # "Not checked: 2 folders on your skip list": the counts above leave them out
         return "\n".join(lines)
 
 
@@ -84,11 +88,12 @@ def _run(cmd: list[str], timeout: int = 10) -> tuple[str, int]:
         return "", -1
 
 
-def profile_system() -> SystemProfile:
-    """Take a complete system profile snapshot."""
+def profile_system(skip=None) -> SystemProfile:
+    """Take a complete system profile snapshot. skip: the folders not to enter (None: the user's skip list)."""
     import shutil
 
     home = Path.home()
+    skip = skip_list(skip)
     p = SystemProfile(
         hostname=platform.node(),
         platform=platform.system(),
@@ -157,8 +162,8 @@ def profile_system() -> SystemProfile:
         p.npm_global_packages = max(0, len(npm_global.splitlines()) - 1)
 
     nm_count = 0
-    for nm in home.rglob("node_modules"):
-        if nm.is_dir() and "node_modules/node_modules" not in str(nm):
+    for dirpath, dirnames, _files in walk(home, skip):
+        if "node_modules" in dirnames and "node_modules/node_modules" not in os.path.join(dirpath, "node_modules"):
             nm_count += 1
         if nm_count > 50:
             break
@@ -173,8 +178,9 @@ def profile_system() -> SystemProfile:
     p.has_npmrc = (home / ".npmrc").exists()
 
     env_count = 0
-    for env in home.rglob(".env"):
-        if "node_modules" not in str(env) and ".git" not in str(env):
+    for dirpath, dirnames, filenames in walk(home, skip):
+        # a folder named .env (a virtual environment) counted too, as rglob counted it
+        if (".env" in filenames or ".env" in dirnames) and "node_modules" not in dirpath and ".git" not in dirpath:
             env_count += 1
         if env_count > 20:
             break
@@ -194,6 +200,8 @@ def profile_system() -> SystemProfile:
             pass
 
     p.vscode_present = shutil.which("code") is not None
+    # what the skip list kept out of the counts (an entry that matched nothing changed no count)
+    p.not_counted = [title for _sev, title, _d, _r, details in skip.notes() if "entries" not in details]
 
     return p
 

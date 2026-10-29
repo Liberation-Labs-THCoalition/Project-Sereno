@@ -3,7 +3,7 @@
     "name": "Sereno — Known-Bad PyPI Packages",
     "updated": "2026-10-23",
     "source": "OSV malware records MAL-2026-2144 (litellm), MAL-2026-2254 / GHSA-955r-262c-33jc (telnyx), MAL-2026-3201 (lightning), GHSA-w37p-236h-pfx3 (pytorch-lightning), MAL-2026-3607/3608 (guardrails-ai, mistralai; CVE-2026-45321, Mini Shai-Hulud)",
-    "description": "Maps package name (lowercase) to its known-bad versions. An empty list means the package had compromised releases but the exact versions aren't listed: reported as high, never skipped."
+    "description": "Maps package name (lowercase) to its known-bad versions. An empty list means the package had compromised releases but the exact versions aren't listed: reported as medium, asking you to check your version (never as a claim that it's a bad one), and never skipped. Any version not in a non-empty list isn't reported."
   },
   "mistralai": [
     "2.4.6"
